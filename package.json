@@ -1,0 +1,36 @@
+{
+  "name": "whagons-skills-vault",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "gonvex dev -- vite",
+    "vite": "vite",
+    "gonvex:dev": "gonvex dev",
+    "gonvex:once": "gonvex dev --once",
+    "gonvex:deploy": "gonvex deploy --env production",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@gonvex/client": "^0.1.2",
+    "@gonvex/protocol": "^0.1.2",
+    "@gonvex/react": "^0.1.2",
+    "@heroui/react": "^3.2.1",
+    "@heroui/styles": "^3.2.1",
+    "@vitejs/plugin-react-swc": "latest",
+    "framer-motion": "^12.42.0",
+    "lucide-react": "^1.22.0",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
+}

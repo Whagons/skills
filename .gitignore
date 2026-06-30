@@ -1,0 +1,8 @@
+.env
+.env.local
+.skills-vault-password
+dist
+node_modules
+.DS_Store
+cli/whagons-skills
+*.log

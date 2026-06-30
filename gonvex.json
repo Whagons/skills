@@ -1,0 +1,7 @@
+{
+  "project": "skills",
+  "runtime": "https://gonvex.whagons.com",
+  "backendDir": "gonvex",
+  "generatedDir": "gonvex/_generated",
+  "tenantMode": "single"
+}
