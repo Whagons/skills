@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -169,6 +170,10 @@ type googleTokenInfo struct {
 
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func Register(app *gonvex.App) {
@@ -598,15 +603,33 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]Skill, error
 	}
 	defer rows.Close()
 
-	skills := []Skill{}
+	byKey := map[string]Skill{}
 	for rows.Next() {
 		var skill Skill
 		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.Content, &skill.CreatedAt, &skill.UpdatedAt); err != nil {
 			return nil, err
 		}
+		key := skillIdentityKey(skill)
+		if current, ok := byKey[key]; !ok || skill.UpdatedAt.After(current.UpdatedAt) {
+			byKey[key] = skill
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	skills := make([]Skill, 0, len(byKey))
+	for _, skill := range byKey {
 		skills = append(skills, skill)
 	}
-	return skills, rows.Err()
+	sort.Slice(skills, func(i, j int) bool {
+		left := strings.ToLower(skills[i].Name)
+		right := strings.ToLower(skills[j].Name)
+		if left == right {
+			return skills[i].UpdatedAt.After(skills[j].UpdatedAt)
+		}
+		return left < right
+	})
+	return skills, nil
 }
 
 func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name string) (Skill, error) {
@@ -655,7 +678,7 @@ func saveSkill(ctx context.Context, runner execer, ownerID string, id string, na
 		}
 		id = nextID
 	}
-	id = scopedID(ownerID, id)
+	id = existingSkillID(ctx, runner, ownerID, id, name)
 	_, err := runner.ExecContext(ctx, `
 		insert into skills (id, owner_id, name, summary, content, created_at, updated_at)
 		values ($1, $2, $3, $4, $5, $6, $6)
@@ -669,6 +692,50 @@ func saveSkill(ctx context.Context, runner execer, ownerID string, id string, na
 		return Skill{}, err
 	}
 	return Skill{ID: id, Name: name, Summary: strings.TrimSpace(summary), Content: content, CreatedAt: now, UpdatedAt: now}, nil
+}
+
+func existingSkillID(ctx context.Context, runner execer, ownerID string, id string, name string) string {
+	scoped := scopedID(ownerID, id)
+	q, ok := runner.(queryer)
+	if !ok {
+		return scoped
+	}
+	var existing string
+	err := q.QueryRowContext(ctx, `
+		select id
+		from skills
+		where owner_id = $1 and (
+			id = $2
+			or id = $3
+			or lower(name) = lower($4)
+		)
+		order by
+			case
+				when id = $2 then 0
+				when lower(name) = lower($4) then 1
+				when id = $3 then 2
+				else 3
+			end,
+			updated_at desc
+		limit 1
+	`, ownerID, scoped, id, name).Scan(&existing)
+	if err == nil && strings.TrimSpace(existing) != "" {
+		return existing
+	}
+	return scoped
+}
+
+func skillIdentityKey(skill Skill) string {
+	id := strings.TrimSpace(skill.ID)
+	if index := strings.Index(id, "_"); index == 12 && len(id) > 13 {
+		id = id[index+1:]
+	}
+	id = strings.TrimPrefix(id, "local-")
+	id = strings.TrimPrefix(id, "cloud-")
+	if id != "" {
+		return strings.ToLower(id)
+	}
+	return strings.ToLower(strings.TrimSpace(skill.Name))
 }
 
 func deleteSkill(ctx context.Context, runner execer, ownerID string, id string) (DeleteResult, error) {
