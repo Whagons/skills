@@ -166,35 +166,54 @@ client.close();`;
 
 function agentSetupInstructions(apiKey: string) {
   const keyLine = apiKey
-    ? `Optional one-time key for this session: ${apiKey}`
-    : "Create or authorize an API key in the Skills Vault before running agent commands.";
-  return `Whagons Skills Vault agent setup
+    ? `API key for this vault owner: ${apiKey}`
+    : "Get an API key from the Skills Vault UI before running authenticated commands.";
+  return `Whagons Skills Vault agent handoff
 
-Install or update the CLI:
+Context:
+- This is the private Whagons Skills Vault at https://skills.whagons.com.
+- It stores Whagons-specific agent skills plus credential handles for the logged-in Google user.
+- Data is owner-scoped. The API key only grants access to the user's own skills and credentials.
+- Prefer the CLI for normal agent work. Use direct Gonvex access only when writing custom automation.
+- Do not print API keys, credential values, OAuth tokens, or full secret JSON.
+
+Primary path: install the CLI
 go install github.com/whagons/skills/cli/cmd/whagons-skills@latest
 
-Authenticate:
+Authenticate the CLI through the browser:
 whagons-skills auth login --app-url https://skills.whagons.com/
 
 ${keyLine}
 
-Install/update all cloud skills into Codex:
+Install or update all cloud skills into Codex:
 whagons-skills skills install-codex
 whagons-skills skills update-codex
 
 Useful commands:
 whagons-skills skills list
+whagons-skills skills get whagons-skills-server --output ./SKILL.md
 whagons-skills skills get whagons-monitor --output ./SKILL.md
 whagons-skills skills copy whagons-monitor
 whagons-skills skills upload ./my-skill/SKILL.md
 whagons-skills credentials list
 whagons-skills credentials exec coolify-whagons -- <command> [args...]
 
+Direct Gonvex API path for custom scripts:
+1. Install the client package in a Node project:
+   npm install @gonvex/client
+
+2. Use the runtime/project:
+   WebSocket: ${gonvexWSURL}
+   Project/tenant: ${gonvexProjectID}
+
+3. Call agent endpoints with the API key:
+${agentExample(apiKey)}
+
 Security rules:
-- Do not print credential values.
-- Use credentials exec to inject secrets into child processes.
-- Skills, API keys, and credentials are scoped to the Google user that authorized the CLI.
-- Store the CLI config at ~/.whagons-skills/config.json with mode 0600.`;
+- Use credentials exec for commands that need secrets.
+- If using agent.credentials.get directly, pass the value only into the command that needs it and never echo it.
+- Store CLI config at ~/.whagons-skills/config.json with mode 0600.
+- Keep uploaded skills universal; avoid private machine paths or one-person local assumptions unless the skill is explicitly local-infra scoped.`;
 }
 
 export default function App() {
@@ -599,15 +618,15 @@ export default function App() {
                   <div className="apiCodeHeader">
                     <div>
                       <p className="overline">Agent snippet</p>
-                      <h3>Gonvex access</h3>
+                      <h3>Skills Vault handoff</h3>
                     </div>
-                    <Button type="button" onPress={() => void copyText(agentExample(freshAPIKey), "Copied API snippet")}>
+                    <Button type="button" onPress={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent handoff")}>
                       <Clipboard size={16} />
                       Copy
                     </Button>
                   </div>
                   <div className="apiCode">
-                    <pre>{agentExample(freshAPIKey)}</pre>
+                    <pre>{agentSetupInstructions(freshAPIKey)}</pre>
                   </div>
                 </Card.Content>
               </Card>
