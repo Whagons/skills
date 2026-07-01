@@ -18,6 +18,7 @@ export const api = {
   "auth.login": { kind: "mutation", path: "auth.login" },
   "auth.logout": { kind: "mutation", path: "auth.logout" },
   "credentials.delete": { kind: "mutation", path: "credentials.delete" },
+  "credentials.get": { kind: "mutation", path: "credentials.get" },
   "credentials.list": { kind: "query", path: "credentials.list" },
   "credentials.save": { kind: "mutation", path: "credentials.save" },
   "skills.delete": { kind: "mutation", path: "skills.delete" },

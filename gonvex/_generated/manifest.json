@@ -1,6 +1,6 @@
 {
   "project": "skills",
-  "generatedAt": "2026-07-01T00:25:30.62417Z",
+  "generatedAt": "2026-07-01T16:58:03.579017Z",
   "functions": {
     "agent.apiKeys.create": {
       "kind": "mutation",
@@ -85,6 +85,11 @@
     "credentials.delete": {
       "kind": "mutation",
       "handler": "DeleteCredential",
+      "file": "gonvex/skills.go"
+    },
+    "credentials.get": {
+      "kind": "mutation",
+      "handler": "GetCredential",
       "file": "gonvex/skills.go"
     },
     "credentials.list": {

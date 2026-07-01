@@ -59,6 +59,10 @@ type CredentialMeta = {
   updated_at: string;
 };
 
+type Credential = CredentialMeta & {
+  value: string;
+};
+
 type CredentialDraft = {
   name: string;
   summary: string;
@@ -245,6 +249,7 @@ export default function App() {
   const deleteSkill = useMutation(api["skills.delete"]);
   const createAPIKey = useMutation(api["apiKeys.create"]);
   const revokeAPIKey = useMutation(api["apiKeys.revoke"]);
+  const getCredential = useMutation(api["credentials.get"]);
   const saveCredential = useMutation(api["credentials.save"]);
   const deleteCredential = useMutation(api["credentials.delete"]);
 
@@ -335,6 +340,11 @@ export default function App() {
   async function copyText(text: string, label: string) {
     await navigator.clipboard.writeText(text);
     setNotice(label);
+  }
+
+  async function copyCredential(credential: CredentialMeta) {
+    const result = await getCredential({ sessionToken, id: credential.id, name: credential.name }) as Credential;
+    await copyText(result.value, `Copied ${credential.name}`);
   }
 
   async function removeSkill(skill: Skill) {
@@ -687,13 +697,19 @@ export default function App() {
                           <strong>{credential.name}</strong>
                           <span>{credential.summary || `Updated ${formatDate(credential.updated_at)}`}</span>
                         </div>
-                        <Button
-                          type="button"
-                          className="dangerButton"
-                          onPress={() => void deleteCredential({ sessionToken, id: credential.id })}
-                        >
-                          Delete
-                        </Button>
+                        <div className="rowActions">
+                          <Button type="button" onPress={() => void copyCredential(credential)}>
+                            <Clipboard size={16} />
+                            Copy
+                          </Button>
+                          <Button
+                            type="button"
+                            className="dangerButton"
+                            onPress={() => void deleteCredential({ sessionToken, id: credential.id })}
+                          >
+                            Delete
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>

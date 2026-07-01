@@ -94,6 +94,12 @@ type SaveCredentialArgs struct {
 	Value        string `json:"value"`
 }
 
+type GetCredentialArgs struct {
+	SessionToken string `json:"sessionToken"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+}
+
 type AgentSaveCredentialArgs struct {
 	APIKey  string `json:"apiKey"`
 	ID      string `json:"id"`
@@ -175,6 +181,7 @@ func Register(app *gonvex.App) {
 	app.Mutation("apiKeys.create", CreateAPIKey)
 	app.Mutation("apiKeys.revoke", RevokeAPIKey)
 	app.Query("credentials.list", ListCredentials)
+	app.Mutation("credentials.get", GetCredential)
 	app.Mutation("credentials.save", SaveCredential)
 	app.Mutation("credentials.delete", DeleteCredential)
 	app.Query("agent.skills.list", AgentListSkills)
@@ -384,6 +391,14 @@ func ListCredentials(ctx *gonvex.QueryCtx, args SessionArgs) ([]CredentialMeta, 
 	return listCredentialMeta(ctx.Context, ctx.DB, ownerID)
 }
 
+func GetCredential(ctx *gonvex.MutationCtx, args GetCredentialArgs) (Credential, error) {
+	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return Credential{}, err
+	}
+	return getCredential(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
+}
+
 func SaveCredential(ctx *gonvex.MutationCtx, args SaveCredentialArgs) (CredentialMeta, error) {
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
@@ -522,19 +537,23 @@ func AgentGetCredential(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Credential, 
 	if err != nil {
 		return Credential{}, err
 	}
-	if ctx.DB == nil {
+	return getCredential(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
+}
+
+func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, name string) (Credential, error) {
+	if db == nil {
 		return Credential{}, errors.New("database is not configured")
 	}
-	if err := ensureTables(ctx.Context, ctx.DB); err != nil {
+	if err := ensureTables(ctx, db); err != nil {
 		return Credential{}, err
 	}
-	row := ctx.DB.QueryRowContext(ctx.Context, `
+	row := db.QueryRowContext(ctx, `
 		select id, name, summary, secret_value, created_at, updated_at
 		from skill_credentials
 		where owner_id = $1 and (($2 <> '' and id = $2) or ($3 <> '' and lower(name) = lower($3)))
 		order by updated_at desc
 		limit 1
-	`, ownerID, strings.TrimSpace(args.ID), strings.TrimSpace(args.Name))
+	`, ownerID, strings.TrimSpace(id), strings.TrimSpace(name))
 	var credential Credential
 	if err := row.Scan(&credential.ID, &credential.Name, &credential.Summary, &credential.Value, &credential.CreatedAt, &credential.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
