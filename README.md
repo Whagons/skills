@@ -1,6 +1,6 @@
 # Whagons Skills Vault
 
-Small Gonvex + React app for storing Whagons-specific skills and project credentials behind server-side password auth.
+Small Gonvex + React app for storing Whagons-specific skills and project credentials behind server-verified Google login.
 
 ## Local Files
 
@@ -28,11 +28,19 @@ npm run vite -- --host 127.0.0.1 --port 5175 --strictPort
 Before syncing/deploying the backend, configure these runtime environment variables:
 
 ```bash
-SKILLS_PASSWORD_SALT=...
-SKILLS_PASSWORD_HASH=...
+SKILLS_GOOGLE_CLIENT_ID=...
+SKILLS_ALLOWED_EMAILS=you@example.com,teammate@example.com
+SKILLS_ALLOWED_DOMAINS=whagons.com
+SKILLS_LEGACY_OWNER_EMAIL=you@example.com
 ```
 
-The source tree intentionally does not contain the real password hash.
+`SKILLS_ALLOWED_EMAILS` and `SKILLS_ALLOWED_DOMAINS` are optional, but recommended. If neither is set, any valid Google account can sign in to an isolated empty vault. `SKILLS_LEGACY_OWNER_EMAIL` claims pre-owner-migration rows for that Google user only.
+
+Configure the frontend with the same Google OAuth client id:
+
+```bash
+VITE_GOOGLE_CLIENT_ID=...
+```
 
 Seed local custom skills from `~/.codex/skills` and `~/.agents/skills`:
 
@@ -56,9 +64,11 @@ node scripts/import-local-credentials.mjs
 
 ## Auth Model
 
-The UI password is verified by the Gonvex backend. A successful login stores a short-lived session token in browser session storage, and all UI mutations/queries require that session token.
+The UI uses Google Identity Services. The browser sends a Google ID token to the Gonvex backend, and the backend verifies it against `https://oauth2.googleapis.com/tokeninfo` before creating a session. A successful login stores a short-lived session token in browser session storage.
 
-Agents do not use the UI password. Create an API key in the UI, then call the agent functions:
+All skills, API keys, sessions, and credentials are scoped by `owner_id`, derived from the verified Google `sub`. A session or API key can only read and mutate rows for its owner.
+
+Agents do not use Google directly. Create or authorize an API key in the UI, then call the agent functions:
 
 - `agent.skills.list`
 - `agent.skills.get`
@@ -72,7 +82,7 @@ Agents do not use the UI password. Create an API key in the UI, then call the ag
 - `agent.credentials.save`
 - `agent.credentials.delete`
 
-Project credentials are stored in the `skill_credentials` table and are only returned through the agent credentials API with a valid API key. Do not print credential values in logs or chat.
+Project credentials are stored in the `skill_credentials` table and are only returned through the agent credentials API with a valid API key owned by the same Google user. Do not print credential values in logs or chat.
 
 ## CLI
 
@@ -83,7 +93,7 @@ cd cli
 go install ./cmd/whagons-skills
 ```
 
-After this repo is published, it can be installed with:
+Install directly:
 
 ```bash
 go install github.com/whagons/skills/cli/cmd/whagons-skills@latest
@@ -92,10 +102,10 @@ go install github.com/whagons/skills/cli/cmd/whagons-skills@latest
 Authorize through the browser:
 
 ```bash
-whagons-skills auth login --app-url http://127.0.0.1:5175/
+whagons-skills auth login --app-url https://skills.whagons.com/
 ```
 
-The login command opens the vault in a browser. After unlocking, click **Authorize CLI**. The CLI stores the returned API key in `~/.whagons-skills/config.json` with file mode `0600`.
+The login command opens the vault in a browser. After Google login, click **Authorize CLI**. The CLI stores the returned API key in `~/.whagons-skills/config.json` with file mode `0600`.
 
 Common commands:
 
@@ -104,6 +114,8 @@ whagons-skills skills list
 whagons-skills skills get whagons-monitor --output ./SKILL.md
 whagons-skills skills upload ./my-skill/SKILL.md
 whagons-skills skills sync ./skills
+whagons-skills skills install-codex
+whagons-skills skills update-codex
 
 whagons-skills credentials list
 printf '%s' "$SECRET_JSON" | whagons-skills credentials set coolify-whagons --summary "Coolify token" --value-stdin
@@ -111,3 +123,20 @@ whagons-skills credentials exec coolify-whagons -- node ./scripts/deploy.mjs
 ```
 
 `credentials exec` fetches the credential, converts it into environment variables for the child process, and does not print the secret value.
+
+`skills install-codex` and `skills update-codex` write cloud skills to `~/.codex/skills/whagons/<skill-name>/SKILL.md` by default. Override with:
+
+```bash
+whagons-skills skills install-codex --dir /path/to/codex/skills
+```
+
+## Agent Bootstrap
+
+The UI has a **Copy agent setup** button in the API keys tab. It copies:
+
+- the `go install` command for the CLI
+- the browser auth command
+- the Codex skill install/update command
+- safe credential usage instructions
+
+Paste that into Codex or another agent. The agent should authenticate through the browser flow, install/update local Codex skills with the CLI, and use `credentials exec` instead of printing secrets.

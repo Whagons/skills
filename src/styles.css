@@ -64,6 +64,13 @@ textarea {
   gap: 10px;
 }
 
+.googleButtonHost {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+}
+
 .fieldStack > span {
   color: #596762;
   font-size: 12px;

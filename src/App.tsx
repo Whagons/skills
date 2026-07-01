@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Button,
   Card,
@@ -76,6 +76,20 @@ type VaultTab = "skills" | "apiKeys" | "credentials";
 const sessionStorageKey = "whagons-skills-vault-session";
 const gonvexWSURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex.whagons.com/ws";
 const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "skills";
+const googleClientID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? "";
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (options: { client_id: string; callback: (response: { credential?: string }) => void }) => void;
+          renderButton: (element: HTMLElement, options: Record<string, unknown>) => void;
+        };
+      };
+    };
+  }
+}
 
 function formatDate(value: string) {
   if (!value) return "Never";
@@ -150,8 +164,42 @@ const credential = await client.query(
 client.close();`;
 }
 
+function agentSetupInstructions(apiKey: string) {
+  const keyLine = apiKey
+    ? `Optional one-time key for this session: ${apiKey}`
+    : "Create or authorize an API key in the Skills Vault before running agent commands.";
+  return `Whagons Skills Vault agent setup
+
+Install or update the CLI:
+go install github.com/whagons/skills/cli/cmd/whagons-skills@latest
+
+Authenticate:
+whagons-skills auth login --app-url https://skills.whagons.com/
+
+${keyLine}
+
+Install/update all cloud skills into Codex:
+whagons-skills skills install-codex
+whagons-skills skills update-codex
+
+Useful commands:
+whagons-skills skills list
+whagons-skills skills get whagons-monitor --output ./SKILL.md
+whagons-skills skills copy whagons-monitor
+whagons-skills skills upload ./my-skill/SKILL.md
+whagons-skills credentials list
+whagons-skills credentials exec coolify-whagons -- <command> [args...]
+
+Security rules:
+- Do not print credential values.
+- Use credentials exec to inject secrets into child processes.
+- Skills, API keys, and credentials are scoped to the Google user that authorized the CLI.
+- Store the CLI config at ~/.whagons-skills/config.json with mode 0600.`;
+}
+
 export default function App() {
   const [sessionToken, setSessionToken] = useState(() => sessionStorage.getItem(sessionStorageKey) ?? "");
+  const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const [cliAuthRequest] = useState<CLIAuthRequest | null>(() => {
     const params = new URLSearchParams(window.location.search);
     const callback = params.get("cli_callback");
@@ -162,7 +210,6 @@ export default function App() {
       name: params.get("cli_name") ?? "Whagons Skills CLI",
     };
   });
-  const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [query, setQuery] = useState("");
   const [activeTab, setActiveTab] = useState<VaultTab>("skills");
@@ -172,15 +219,15 @@ export default function App() {
   const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>({ name: "", summary: "", value: "" });
 
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
-  const skills = useQuery<Skill[]>(api.skills.list, protectedArgs) ?? [];
-  const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, protectedArgs) ?? [];
-  const credentials = useQuery<CredentialMeta[]>(api.credentials.list, protectedArgs) ?? [];
-  const login = useMutation(api.auth.login);
-  const deleteSkill = useMutation(api.skills.delete);
-  const createAPIKey = useMutation(api.apiKeys.create);
-  const revokeAPIKey = useMutation(api.apiKeys.revoke);
-  const saveCredential = useMutation(api.credentials.save);
-  const deleteCredential = useMutation(api.credentials.delete);
+  const skills = useQuery<Skill[]>(api["skills.list"], protectedArgs) ?? [];
+  const apiKeys = useQuery<APIKeyRecord[]>(api["apiKeys.list"], protectedArgs) ?? [];
+  const credentials = useQuery<CredentialMeta[]>(api["credentials.list"], protectedArgs) ?? [];
+  const login = useMutation(api["auth.login"]);
+  const deleteSkill = useMutation(api["skills.delete"]);
+  const createAPIKey = useMutation(api["apiKeys.create"]);
+  const revokeAPIKey = useMutation(api["apiKeys.revoke"]);
+  const saveCredential = useMutation(api["credentials.save"]);
+  const deleteCredential = useMutation(api["credentials.delete"]);
 
   const filteredSkills = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -208,17 +255,61 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  async function unlock(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  useEffect(() => {
+    if (sessionToken || !googleClientID || !googleButtonRef.current) return;
+
+    let cancelled = false;
+    const render = () => {
+      if (cancelled || !window.google || !googleButtonRef.current) return;
+      window.google.accounts.id.initialize({
+        client_id: googleClientID,
+        callback: (response) => {
+          if (response.credential) {
+            void signInWithGoogle(response.credential);
+          } else {
+            setAuthError("Google did not return an identity token.");
+          }
+        },
+      });
+      googleButtonRef.current.innerHTML = "";
+      window.google.accounts.id.renderButton(googleButtonRef.current, {
+        theme: "filled_black",
+        size: "large",
+        type: "standard",
+        shape: "pill",
+        text: "continue_with",
+        width: 280,
+      });
+    };
+
+    if (window.google) {
+      render();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = render;
+    script.onerror = () => setAuthError("Could not load Google sign-in.");
+    document.head.appendChild(script);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionToken]);
+
+  async function signInWithGoogle(idToken: string) {
     setAuthError("");
     try {
-      const result = await login({ password }) as LoginResult;
+      const result = await login({ idToken }) as LoginResult;
       sessionStorage.setItem(sessionStorageKey, result.sessionToken);
       setSessionToken(result.sessionToken);
-      setPassword("");
       setAuthError("");
     } catch {
-      setAuthError("Password did not match.");
+      setAuthError("Google login was rejected.");
     }
   }
 
@@ -275,25 +366,14 @@ export default function App() {
             </div>
           </Card.Header>
           <Card.Content>
-            <form className="authForm" onSubmit={(event) => void unlock(event)}>
-              <label className="fieldStack">
-                <span>Password</span>
-                <Input
-                  autoFocus
-                  fullWidth
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  type="password"
-                  autoComplete="current-password"
-                  placeholder="Enter vault password"
-                />
-              </label>
+            <div className="authForm">
+              {googleClientID ? (
+                <div className="googleButtonHost" ref={googleButtonRef} aria-label="Sign in with Google" />
+              ) : (
+                <div className="authError">Google login is not configured for this deployment.</div>
+              )}
               {authError ? <div className="authError">{authError}</div> : null}
-              <Button fullWidth type="submit" variant="primary">
-                <LockKeyhole size={16} />
-                Unlock vault
-              </Button>
-            </form>
+            </div>
           </Card.Content>
         </Card>
       </main>
@@ -469,6 +549,10 @@ export default function App() {
                 <p className="summaryLine">Create keys for the CLI and agents. New key values are shown once.</p>
               </div>
               <div className="primaryActions">
+                <Button type="button" onPress={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent setup")}>
+                  <Clipboard size={16} />
+                  Copy agent setup
+                </Button>
                 <Button type="button" variant="primary" onPress={() => void makeAPIKey()}>
                   <KeyRound size={16} />
                   Create API key

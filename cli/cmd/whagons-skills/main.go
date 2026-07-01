@@ -29,7 +29,7 @@ import (
 const (
 	defaultWSURL   = "wss://gonvex.whagons.com/ws"
 	defaultProject = "skills"
-	defaultAppURL  = "http://127.0.0.1:5175/"
+	defaultAppURL  = "https://skills.whagons.com/"
 )
 
 type Config struct {
@@ -139,6 +139,8 @@ Usage:
   whagons-skills skills copy <name-or-id>
   whagons-skills skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
   whagons-skills skills sync <DIR>
+  whagons-skills skills install-codex [--dir DIR]
+  whagons-skills skills update-codex [--dir DIR]
   whagons-skills skills delete <name-or-id>
   whagons-skills api-keys list
   whagons-skills api-keys create [name]
@@ -147,6 +149,12 @@ Usage:
   whagons-skills credentials set <name> [--summary TEXT] [--value-stdin]
   whagons-skills credentials delete <id>
   whagons-skills credentials exec <name> [--prefix PREFIX] -- <command> [args...]
+
+What it does:
+  - Authenticates by opening the Skills Vault in your browser.
+  - Lists, copies, uploads, and deletes your personal cloud skills.
+  - Installs or updates cloud skills into Codex-compatible SKILL.md folders.
+  - Stores project credentials and injects them into child processes without printing them.
 
 Secrets are not printed by default. Use credentials exec to inject them into a child process.
 `)
@@ -263,6 +271,13 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 		}
 		fmt.Printf("Synced %d skills\n", len(files))
 		return nil
+	case "install-codex", "update-codex":
+		fs := flag.NewFlagSet("skills "+command, flag.ContinueOnError)
+		dir := fs.String("dir", defaultCodexSkillsDir(), "Codex skills directory")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		return installCodexSkills(client, apiKey, *dir)
 	case "delete":
 		if len(args) < 1 {
 			return errors.New("missing skill name or id")
@@ -711,6 +726,56 @@ func discoverSkillFiles(root string) ([]string, error) {
 	})
 	sort.Strings(files)
 	return files, err
+}
+
+func installCodexSkills(client *Client, apiKey string, dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("Codex skills directory is required")
+	}
+	var skills []Skill
+	if err := client.Query("agent.skills.list", map[string]any{"apiKey": apiKey}, &skills); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, skill := range skills {
+		name := safePathName(skill.Name)
+		if name == "" {
+			name = safePathName(skill.ID)
+		}
+		skillDir := filepath.Join(dir, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			return err
+		}
+		path := filepath.Join(skillDir, "SKILL.md")
+		if err := os.WriteFile(path, []byte(skill.Content), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("Installed %s -> %s\n", skill.Name, path)
+	}
+	fmt.Printf("Installed %d skills into %s\n", len(skills), dir)
+	return nil
+}
+
+func defaultCodexSkillsDir() string {
+	if dir := os.Getenv("CODEX_SKILLS_DIR"); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".codex/skills/whagons"
+	}
+	return filepath.Join(home, ".codex", "skills", "whagons")
+}
+
+var pathReplace = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+func safePathName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = pathReplace.ReplaceAllString(value, "-")
+	value = strings.Trim(value, "-.")
+	return value
 }
 
 func parseFrontmatter(content, fallbackName string) (string, string) {
