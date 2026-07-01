@@ -32,7 +32,7 @@ SKILLS_ALLOWED_DOMAINS=whagons.com
 SKILLS_LEGACY_OWNER_EMAIL=you@example.com
 ```
 
-`SKILLS_GOOGLE_CLIENT_ID` is optional because the Whagons web client id is the built-in default. `SKILLS_ALLOWED_EMAILS` and `SKILLS_ALLOWED_DOMAINS` are optional, but recommended. If neither is set, any valid Google account can sign in to an isolated empty vault. `SKILLS_LEGACY_OWNER_EMAIL` claims pre-owner-migration rows for that Google user only.
+`SKILLS_GOOGLE_CLIENT_ID` is optional because the Whagons web client id is the built-in default. If neither `SKILLS_ALLOWED_EMAILS` nor `SKILLS_ALLOWED_DOMAINS` is set, the vault only allows `malek.gabriel33@gmail.com`. `SKILLS_LEGACY_OWNER_EMAIL` claims pre-owner-migration rows for that Google user only.
 
 Configure the frontend with the same Google OAuth client id:
 

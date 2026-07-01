@@ -21,6 +21,7 @@ import (
 
 const sessionTTL = 30 * 24 * time.Hour
 const defaultGoogleClientID = "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com"
+const defaultAllowedEmail = "malek.gabriel33@gmail.com"
 
 type SessionArgs struct {
 	SessionToken string `json:"sessionToken"`
@@ -903,7 +904,7 @@ func identityAllowed(info googleTokenInfo) bool {
 	allowedEmails := splitCSV(os.Getenv("SKILLS_ALLOWED_EMAILS"))
 	allowedDomains := splitCSV(os.Getenv("SKILLS_ALLOWED_DOMAINS"))
 	if len(allowedEmails) == 0 && len(allowedDomains) == 0 {
-		return true
+		allowedEmails = []string{defaultAllowedEmail}
 	}
 	for _, allowed := range allowedEmails {
 		if email == strings.ToLower(allowed) {
