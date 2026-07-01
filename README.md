@@ -5,8 +5,7 @@ Small Gonvex + React app for storing Whagons-specific skills and project credent
 ## Local Files
 
 - `.env.local` contains the Gonvex runtime settings and project key.
-- `.skills-vault-password` contains the generated local UI password.
-- Both files are ignored by git.
+- It is ignored by git.
 
 ## Commands
 
@@ -45,12 +44,14 @@ VITE_GOOGLE_CLIENT_ID=...
 Seed local custom skills from `~/.codex/skills` and `~/.agents/skills`:
 
 ```bash
+WHAGONS_SKILLS_API_KEY=skv_... \
 node scripts/seed-local-skills.mjs
 ```
 
 Import selected local credentials into the vault without printing secret values:
 
 ```bash
+WHAGONS_SKILLS_API_KEY=skv_... \
 node scripts/import-local-credentials.mjs
 ```
 
@@ -59,6 +60,7 @@ By default this imports `coolify-whagons`, `coolify-gabrielmalek`, `digitalocean
 ```bash
 SKILLS_CREDENTIAL_IMPORT_FILE=/path/to/keys.json \
 SKILLS_CREDENTIAL_IMPORT_NAMES=coolify-whagons,cloudflare \
+WHAGONS_SKILLS_API_KEY=skv_... \
 node scripts/import-local-credentials.mjs
 ```
 

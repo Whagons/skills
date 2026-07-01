@@ -37,9 +37,10 @@ try {
 }
 
 const localCredentials = JSON.parse(raw);
-let password = process.env.SKILLS_VAULT_PASSWORD || "";
-if (!password) {
-  password = (await readFile(".skills-vault-password", "utf8")).trim();
+const apiKey = process.env.WHAGONS_SKILLS_API_KEY || process.env.SKILLS_VAULT_API_KEY || "";
+if (!apiKey) {
+  console.error("Set WHAGONS_SKILLS_API_KEY to an API key created in the vault UI.");
+  process.exit(1);
 }
 
 const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex.whagons.com/ws");
@@ -51,7 +52,6 @@ const client = new GonvexClient(wsURL.toString(), {
 });
 
 try {
-  const session = await client.mutation({ kind: "mutation", path: "auth.login" }, { password });
   let imported = 0;
   let skipped = 0;
   for (const name of credentialNames) {
@@ -62,9 +62,9 @@ try {
       continue;
     }
     await client.mutation(
-      { kind: "mutation", path: "credentials.save" },
+      { kind: "mutation", path: "agent.credentials.save" },
       {
-        sessionToken: session.sessionToken,
+        apiKey,
         id: `credential-${name}`,
         name,
         summary: summarizeCredential(name, value),

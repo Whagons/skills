@@ -56,17 +56,15 @@ const client = new GonvexClient(wsURL.toString(), {
   tenant: process.env.GONVEX_PROJECT_ID || "skills",
 });
 
-const saveRef = { kind: "mutation", path: "skills.save" };
-const listRef = { kind: "query", path: "skills.list" };
-const deleteRef = { kind: "mutation", path: "skills.delete" };
-const loginRef = { kind: "mutation", path: "auth.login" };
+const saveRef = { kind: "mutation", path: "agent.skills.upload" };
+const listRef = { kind: "query", path: "agent.skills.list" };
+const deleteRef = { kind: "mutation", path: "agent.skills.delete" };
 
-let password = process.env.SKILLS_VAULT_PASSWORD || "";
-if (!password) {
-  password = (await readFile(".skills-vault-password", "utf8")).trim();
+const apiKey = process.env.WHAGONS_SKILLS_API_KEY || process.env.SKILLS_VAULT_API_KEY || "";
+if (!apiKey) {
+  console.error("Set WHAGONS_SKILLS_API_KEY to an API key created in the vault UI.");
+  process.exit(1);
 }
-const session = await client.mutation(loginRef, { password });
-const sessionToken = session.sessionToken;
 
 const localSkillFiles = await discoverSkillFiles();
 const seededIDs = new Set();
@@ -82,7 +80,7 @@ for (const file of localSkillFiles) {
   const id = `local-${metadata.name}`;
   seededIDs.add(id);
   await client.mutation(saveRef, {
-    sessionToken,
+    apiKey,
     id,
     name: metadata.name,
     summary: metadata.summary,
@@ -91,10 +89,10 @@ for (const file of localSkillFiles) {
   console.log(`seeded ${metadata.name}`);
 }
 
-const existing = await client.query(listRef, { sessionToken });
+const existing = await client.query(listRef, { apiKey });
 for (const skill of existing) {
   if (typeof skill.id === "string" && skill.id.startsWith("local-") && !seededIDs.has(skill.id)) {
-    await client.mutation(deleteRef, { sessionToken, id: skill.id });
+    await client.mutation(deleteRef, { apiKey, id: skill.id });
     console.log(`removed stale ${skill.name}`);
   }
 }
