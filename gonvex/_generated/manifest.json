@@ -1,6 +1,6 @@
 {
   "project": "skills",
-  "generatedAt": "2026-07-01T00:15:34.045567Z",
+  "generatedAt": "2026-07-01T00:25:30.62417Z",
   "functions": {
     "agent.apiKeys.create": {
       "kind": "mutation",

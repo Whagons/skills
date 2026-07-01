@@ -20,6 +20,7 @@ import (
 )
 
 const sessionTTL = 30 * 24 * time.Hour
+const defaultGoogleClientID = "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com"
 
 type SessionArgs struct {
 	SessionToken string `json:"sessionToken"`
@@ -859,7 +860,7 @@ func loginIdentity(ctx context.Context, args LoginArgs) (string, string, string,
 func verifyGoogleIDToken(ctx context.Context, idToken string) (googleTokenInfo, error) {
 	clientID := strings.TrimSpace(os.Getenv("SKILLS_GOOGLE_CLIENT_ID"))
 	if clientID == "" {
-		return googleTokenInfo{}, errors.New("google login is not configured")
+		clientID = defaultGoogleClientID
 	}
 	endpoint := "https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(strings.TrimSpace(idToken))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

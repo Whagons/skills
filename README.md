@@ -27,13 +27,12 @@ npm run vite -- --host 127.0.0.1 --port 5175 --strictPort
 Before syncing/deploying the backend, configure these runtime environment variables:
 
 ```bash
-SKILLS_GOOGLE_CLIENT_ID=...
 SKILLS_ALLOWED_EMAILS=you@example.com,teammate@example.com
 SKILLS_ALLOWED_DOMAINS=whagons.com
 SKILLS_LEGACY_OWNER_EMAIL=you@example.com
 ```
 
-`SKILLS_ALLOWED_EMAILS` and `SKILLS_ALLOWED_DOMAINS` are optional, but recommended. If neither is set, any valid Google account can sign in to an isolated empty vault. `SKILLS_LEGACY_OWNER_EMAIL` claims pre-owner-migration rows for that Google user only.
+`SKILLS_GOOGLE_CLIENT_ID` is optional because the Whagons web client id is the built-in default. `SKILLS_ALLOWED_EMAILS` and `SKILLS_ALLOWED_DOMAINS` are optional, but recommended. If neither is set, any valid Google account can sign in to an isolated empty vault. `SKILLS_LEGACY_OWNER_EMAIL` claims pre-owner-migration rows for that Google user only.
 
 Configure the frontend with the same Google OAuth client id:
 
