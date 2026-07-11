@@ -96,7 +96,7 @@ textarea {
 
 .vaultSidebar {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   height: 100vh;
   min-height: 0;
   overflow: hidden;
@@ -278,6 +278,42 @@ textarea {
 .cliAuthBanner p {
   margin: 0;
   color: #9db3aa;
+}
+
+.cliAuthBanner code {
+  color: #d9fef0;
+  font-size: 13px;
+}
+
+.sidebarAccount {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 14px 22px;
+}
+
+.sidebarAccountInfo {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sidebarAccountInfo strong {
+  color: #f7fffb;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebarAccountInfo span {
+  color: #9eaca6;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mainHeader {

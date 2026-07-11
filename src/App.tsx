@@ -17,20 +17,26 @@ import {
   KeyRound,
   Link2,
   LockKeyhole,
+  LogOut,
   Plus,
   Search,
   Trash2,
+  Users,
+  X,
 } from "lucide-react";
 import { api } from "../gonvex/_generated/api";
 import { useMutation, useQuery } from "../gonvex/_generated/react";
 
-type Skill = {
+type SkillMeta = {
   id: string;
   name: string;
   summary: string;
-  content: string;
   created_at: string;
   updated_at: string;
+};
+
+type Skill = SkillMeta & {
+  content: string;
 };
 
 type APIKeyRecord = {
@@ -75,9 +81,49 @@ type CLIAuthRequest = {
   name: string;
 };
 
-type VaultTab = "skills" | "apiKeys" | "credentials";
+type MeResult = {
+  email: string;
+  name: string;
+  is_owner: boolean;
+  workspace_email: string;
+};
+
+type TeamMember = {
+  id: string;
+  email: string;
+  created_at: string;
+};
+
+type VaultTab = "skills" | "apiKeys" | "credentials" | "team";
 
 const sessionStorageKey = "whagons-skills-vault-session";
+
+type StoredSession = {
+  sessionToken: string;
+  expiresAt: string;
+};
+
+function readStoredSession(): string {
+  const raw = sessionStorage.getItem(sessionStorageKey);
+  if (!raw) return "";
+  try {
+    const stored = JSON.parse(raw) as StoredSession;
+    if (stored && typeof stored.sessionToken === "string") {
+      if (stored.expiresAt && new Date(stored.expiresAt).getTime() <= Date.now()) {
+        sessionStorage.removeItem(sessionStorageKey);
+        return "";
+      }
+      return stored.sessionToken;
+    }
+  } catch {
+    // Pre-expiry format: the raw token string.
+  }
+  return raw;
+}
+
+function isInvalidSessionError(error: unknown) {
+  return error instanceof Error && /invalid session|session token is required/i.test(error.message);
+}
 const gonvexWSURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex.whagons.com/ws";
 const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "skills";
 const googleClientID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? "";
@@ -113,8 +159,19 @@ function displayMarkdown(value: string) {
   return value.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
 }
 
-function shareURL(skill: Skill) {
+function shareURL(skill: SkillMeta) {
   return `${window.location.origin}${window.location.pathname}#${encodeURIComponent(skill.id)}`;
+}
+
+function parseLoopbackCallback(rawCallback: string): URL | null {
+  try {
+    const url = new URL(rawCallback);
+    const loopbackHosts = ["127.0.0.1", "localhost", "[::1]"];
+    if (url.protocol !== "http:" || !loopbackHosts.includes(url.hostname)) return null;
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function agentExample(apiKey: string) {
@@ -170,67 +227,72 @@ client.close();`;
 
 function agentSetupInstructions(apiKey: string) {
   const keyLine = apiKey
-    ? `API key for this vault owner: ${apiKey}`
-    : "Get an API key from the Skills Vault UI before running authenticated commands.";
-  return `Whagons Skills Vault agent handoff
+    ? `An API key for this workspace is included below. Save it into the CLI once (headless-friendly,
+skips the browser):
+   printf '%s' '${apiKey}' | whagons-dev auth set-key --stdin
+Or export WHAGONS_DEV_API_KEY=${apiKey} for ephemeral use. Then delete this handoff text.`
+    : "No API key pasted here — the CLI will open the browser to authorize itself on first use.";
+  return `Whagons Skills Vault — agent setup (plug and play)
 
-Context:
-- This is the private Whagons Skills Vault at https://skills.whagons.com.
-- It stores Whagons-specific agent skills plus credential handles for the logged-in Google user.
-- Data is owner-scoped. The API key only grants access to the user's own skills and credentials.
-- Prefer the CLI for normal agent work. Use direct Gonvex access only when writing custom automation.
-- Do not print API keys, credential values, OAuth tokens, or full secret JSON.
+Goal: give this agent the Whagons team's skills and project credentials with two commands.
 
-Primary path: install the CLI
-go install github.com/whagons/skills/cli/cmd/whagons-skills@latest
+1. Install the whagons-dev CLI:
+   go install github.com/whagons/skills/cli/cmd/whagons-dev@latest
 
-Authenticate the CLI through the browser:
-whagons-skills auth login --app-url https://skills.whagons.com/
+2. Install the team's skills locally (the CLI opens https://skills.whagons.com in the
+   browser on first run, you click "Authorize CLI", and it saves its own API key):
+   whagons-dev skills install-codex
 
 ${keyLine}
 
-Install or update all cloud skills into Codex:
-whagons-skills skills install-codex
-whagons-skills skills update-codex
+That's it. From then on:
+- Refresh skills any time: whagons-dev skills update-codex
+- See what credentials exist: whagons-dev credentials list
+- Run anything that needs a secret WITHOUT printing it:
+  whagons-dev credentials exec coolify-whagons -- <command> [args...]
+  (the credential is injected as environment variables, e.g. COOLIFY_WHAGONS_JSON)
 
-Useful commands:
-whagons-skills skills list
-whagons-skills skills get whagons-skills-server --output ./SKILL.md
-whagons-skills skills get whagons-monitor --output ./SKILL.md
-whagons-skills skills copy whagons-monitor
-whagons-skills skills upload ./my-skill/SKILL.md
-whagons-skills credentials list
-whagons-skills credentials exec coolify-whagons -- <command> [args...]
+Context:
+- The vault at https://skills.whagons.com stores Whagons-specific agent skills and
+  project credentials, shared across the workspace's invited team members.
+- The API key grants access to this workspace only. Anyone on the team can be invited
+  by the workspace owner from the Team tab.
+- Do not print API keys, credential values, OAuth tokens, or full secret JSON.
+
+Other useful commands:
+whagons-dev skills list
+whagons-dev skills get whagons-monitor --output ./SKILL.md
+whagons-dev skills copy whagons-monitor
+whagons-dev skills upload ./my-skill/SKILL.md
+whagons-dev skills sync ./skills
+whagons-dev auth status
 
 Direct Gonvex API path for custom scripts:
-1. Install the client package in a Node project:
-   npm install @gonvex/client
-
-2. Use the runtime/project:
-   WebSocket: ${gonvexWSURL}
-   Project/tenant: ${gonvexProjectID}
-
+1. npm install @gonvex/client
+2. Runtime: ${gonvexWSURL}  ·  project/tenant: ${gonvexProjectID}
 3. Call agent endpoints with the API key:
 ${agentExample(apiKey)}
 
 Security rules:
 - Use credentials exec for commands that need secrets.
-- If using agent.credentials.get directly, pass the value only into the command that needs it and never echo it.
-- Store CLI config at ~/.whagons-skills/config.json with mode 0600.
-- Keep uploaded skills universal; avoid private machine paths or one-person local assumptions unless the skill is explicitly local-infra scoped.`;
+- If using agent.credentials.get directly, pass the value only into the command that
+  needs it and never echo it.
+- The CLI stores its config at ~/.whagons-dev/config.json with mode 0600.
+- Keep uploaded skills universal; avoid private machine paths or one-person local
+  assumptions unless the skill is explicitly local-infra scoped.`;
 }
 
 export default function App() {
-  const [sessionToken, setSessionToken] = useState(() => sessionStorage.getItem(sessionStorageKey) ?? "");
+  const [sessionToken, setSessionToken] = useState(readStoredSession);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
-  const [cliAuthRequest] = useState<CLIAuthRequest | null>(() => {
+  const [cliAuthRequest, setCliAuthRequest] = useState<CLIAuthRequest | null>(() => {
     const params = new URLSearchParams(window.location.search);
     const callback = params.get("cli_callback");
     if (!callback) return null;
     return {
       callback,
       state: params.get("cli_state") ?? "",
-      name: params.get("cli_name") ?? "Whagons Skills CLI",
+      name: params.get("cli_name") ?? "Whagons Dev CLI",
     };
   });
   const [authError, setAuthError] = useState("");
@@ -240,28 +302,41 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [freshAPIKey, setFreshAPIKey] = useState("");
   const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>({ name: "", summary: "", value: "" });
+  const [inviteEmail, setInviteEmail] = useState("");
 
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
-  const skills = useQuery<Skill[]>(api["skills.list"], protectedArgs) ?? [];
+  const skills = useQuery<SkillMeta[]>(api["skills.list"], protectedArgs) ?? [];
   const apiKeys = useQuery<APIKeyRecord[]>(api["apiKeys.list"], protectedArgs) ?? [];
   const credentials = useQuery<CredentialMeta[]>(api["credentials.list"], protectedArgs) ?? [];
+  const me = useQuery<MeResult>(api["auth.me"], protectedArgs) ?? null;
+  const teamMembers = useQuery<TeamMember[]>(api["team.list"], protectedArgs) ?? [];
   const login = useMutation(api["auth.login"]);
+  const logout = useMutation(api["auth.logout"]);
   const deleteSkill = useMutation(api["skills.delete"]);
   const createAPIKey = useMutation(api["apiKeys.create"]);
   const revokeAPIKey = useMutation(api["apiKeys.revoke"]);
   const getCredential = useMutation(api["credentials.get"]);
   const saveCredential = useMutation(api["credentials.save"]);
   const deleteCredential = useMutation(api["credentials.delete"]);
+  const inviteMember = useMutation(api["team.invite"]);
+  const removeMember = useMutation(api["team.remove"]);
+  const isWorkspaceOwner = me?.is_owner ?? true;
+  const cliCallbackURL = cliAuthRequest ? parseLoopbackCallback(cliAuthRequest.callback) : null;
 
   const filteredSkills = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return skills;
     return skills.filter((skill) => {
-      return [skill.name, skill.summary, skill.content].some((value) => value.toLowerCase().includes(needle));
+      return [skill.name, skill.summary].some((value) => value.toLowerCase().includes(needle));
     });
   }, [query, skills]);
 
   const selectedSkill = skills.find((skill) => skill.id === selectedID) ?? filteredSkills[0] ?? skills[0] ?? null;
+  const selectedSkillFull = useQuery<Skill>(
+    api["skills.get"],
+    sessionToken && selectedSkill ? { sessionToken, id: selectedSkill.id } : "skip",
+  ) ?? null;
+  const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
   const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at);
 
   useEffect(() => {
@@ -329,11 +404,28 @@ export default function App() {
     setAuthError("");
     try {
       const result = await login({ idToken }) as LoginResult;
-      sessionStorage.setItem(sessionStorageKey, result.sessionToken);
+      const stored: StoredSession = { sessionToken: result.sessionToken, expiresAt: result.expires_at };
+      sessionStorage.setItem(sessionStorageKey, JSON.stringify(stored));
       setSessionToken(result.sessionToken);
       setAuthError("");
     } catch {
       setAuthError("Google login was rejected.");
+    }
+  }
+
+  // Wraps session-backed actions: an expired/revoked session drops back to the
+  // login screen instead of failing silently; other errors surface as a toast.
+  async function runGuarded(action: () => Promise<void>) {
+    try {
+      await action();
+    } catch (error) {
+      if (isInvalidSessionError(error)) {
+        sessionStorage.removeItem(sessionStorageKey);
+        setSessionToken("");
+        setAuthError("Your session expired. Sign in again.");
+        return;
+      }
+      setNotice(error instanceof Error ? error.message : "Something went wrong");
     }
   }
 
@@ -343,39 +435,101 @@ export default function App() {
   }
 
   async function copyCredential(credential: CredentialMeta) {
-    const result = await getCredential({ sessionToken, id: credential.id, name: credential.name }) as Credential;
-    await copyText(result.value, `Copied ${credential.name}`);
+    await runGuarded(async () => {
+      const result = await getCredential({ sessionToken, id: credential.id, name: credential.name }) as Credential;
+      await copyText(result.value, `Copied ${credential.name}`);
+    });
   }
 
-  async function removeSkill(skill: Skill) {
-    await deleteSkill({ sessionToken, id: skill.id });
-    setNotice("Deleted skill");
+  async function removeSkill(skill: SkillMeta) {
+    await runGuarded(async () => {
+      await deleteSkill({ sessionToken, id: skill.id });
+      setNotice("Deleted skill");
+    });
   }
 
   async function makeAPIKey() {
-    const result = await createAPIKey({ sessionToken, name: `Agent key ${new Date().toLocaleString()}` }) as CreateAPIKeyResult;
-    setFreshAPIKey(result.apiKey);
-    setNotice("Created API key");
+    await runGuarded(async () => {
+      const result = await createAPIKey({ sessionToken, name: `Agent key ${new Date().toLocaleString()}` }) as CreateAPIKeyResult;
+      setFreshAPIKey(result.apiKey);
+      setNotice("Created API key");
+    });
   }
 
   async function authorizeCLI() {
-    if (!cliAuthRequest) return;
-    const result = await createAPIKey({ sessionToken, name: `${cliAuthRequest.name} ${new Date().toLocaleString()}` }) as CreateAPIKeyResult;
-    const callback = new URL(cliAuthRequest.callback);
-    callback.searchParams.set("api_key", result.apiKey);
-    callback.searchParams.set("api_key_prefix", result.record.prefix);
-    callback.searchParams.set("state", cliAuthRequest.state);
-    callback.searchParams.set("project", gonvexProjectID);
-    callback.searchParams.set("ws_url", gonvexWSURL);
-    callback.searchParams.set("app_url", window.location.origin + window.location.pathname);
-    window.location.href = callback.toString();
+    if (!cliAuthRequest || !cliCallbackURL) return;
+    await runGuarded(async () => {
+      await deliverCLIKey(cliAuthRequest, cliCallbackURL);
+    });
+  }
+
+  async function deliverCLIKey(request: CLIAuthRequest, callbackURL: URL) {
+    const result = await createAPIKey({ sessionToken, name: `${request.name} ${new Date().toLocaleString()}` }) as CreateAPIKeyResult;
+    const payload = {
+      api_key: result.apiKey,
+      api_key_prefix: result.record.prefix,
+      state: request.state,
+      project: gonvexProjectID,
+      ws_url: gonvexWSURL,
+      app_url: window.location.origin + window.location.pathname,
+    };
+    try {
+      // POST keeps the API key out of browser history. The CLI's loopback
+      // server answers with CORS headers.
+      const response = await fetch(callbackURL.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(`callback returned ${response.status}`);
+      setCliAuthRequest(null);
+      window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+      setNotice("CLI authorized — return to your terminal");
+    } catch {
+      // Older CLI builds only handle the GET redirect.
+      const callback = new URL(callbackURL.toString());
+      for (const [key, value] of Object.entries(payload)) {
+        callback.searchParams.set(key, value);
+      }
+      window.location.href = callback.toString();
+    }
+  }
+
+  async function signOut() {
+    try {
+      await logout({ sessionToken });
+    } catch {
+      // Session may already be expired; clear it locally regardless.
+    }
+    sessionStorage.removeItem(sessionStorageKey);
+    setSessionToken("");
+  }
+
+  async function submitInvite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = inviteEmail.trim();
+    if (!email) return;
+    await runGuarded(async () => {
+      await inviteMember({ sessionToken, email }) as TeamMember;
+      setInviteEmail("");
+      setNotice(`Invited ${email}`);
+    });
+  }
+
+  async function dropMember(member: TeamMember) {
+    await runGuarded(async () => {
+      await removeMember({ sessionToken, id: member.id });
+      setNotice(`Removed ${member.email}`);
+    });
   }
 
   async function storeCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await saveCredential({ sessionToken, ...credentialDraft });
-    setCredentialDraft({ name: "", summary: "", value: "" });
-    setNotice("Stored credential");
+    await runGuarded(async () => {
+      await saveCredential({ sessionToken, ...credentialDraft });
+      setCredentialDraft({ name: "", summary: "", value: "" });
+      setNotice("Stored credential");
+    });
   }
 
   if (!sessionToken) {
@@ -433,6 +587,10 @@ export default function App() {
             <Database size={17} />
             Credentials
           </button>
+          <button className={activeTab === "team" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("team")}>
+            <Users size={17} />
+            Team
+          </button>
         </div>
 
         {activeTab === "skills" ? (
@@ -467,17 +625,40 @@ export default function App() {
                   }}
                 >
                   <span className="skillRowTitle">{skill.name}</span>
-                  <span className="skillRowMeta">{skill.summary || `${skill.content.length.toLocaleString()} characters`}</span>
+                  <span className="skillRowMeta">{skill.summary || `Updated ${formatDate(skill.updated_at)}`}</span>
                 </button>
               ))}
             </ScrollShadow>
           </>
         ) : (
           <div className="sidebarHint">
-            <strong>{activeTab === "apiKeys" ? `${activeAPIKeys.length} active keys` : `${credentials.length} credentials`}</strong>
-            <span>{activeTab === "apiKeys" ? "Create and revoke agent access." : "Store secrets for CLI and agents."}</span>
+            <strong>
+              {activeTab === "apiKeys" ? `${activeAPIKeys.length} active keys`
+                : activeTab === "credentials" ? `${credentials.length} credentials`
+                : `${teamMembers.length} invited members`}
+            </strong>
+            <span>
+              {activeTab === "apiKeys" ? "Create and revoke agent access."
+                : activeTab === "credentials" ? "Store secrets for CLI and agents."
+                : "Share this workspace with teammates."}
+            </span>
           </div>
         )}
+
+        <div className="sidebarAccount">
+          <div className="sidebarAccountInfo">
+            <strong>{me?.name || me?.email || "Signed in"}</strong>
+            {me && !me.is_owner ? <span>Workspace of {me.workspace_email || "the owner"}</span> : <span>{me?.email ?? ""}</span>}
+          </div>
+          <Tooltip>
+            <Tooltip.Trigger>
+              <Button type="button" aria-label="Sign out" onPress={() => void signOut()}>
+                <LogOut size={16} />
+              </Button>
+            </Tooltip.Trigger>
+            <Tooltip.Content>Sign out</Tooltip.Content>
+          </Tooltip>
+        </div>
       </aside>
 
       <section className="vaultMain">
@@ -486,12 +667,30 @@ export default function App() {
             <div>
               <p className="overline">CLI authorization</p>
               <h3>{cliAuthRequest.name}</h3>
-              <p>Create a vault API key and send it back to the local CLI callback.</p>
+              {cliCallbackURL ? (
+                <p>Create a workspace API key and send it to <code>{cliCallbackURL.origin}</code> on this machine.</p>
+              ) : (
+                <p className="authError">Blocked: callback {cliAuthRequest.callback} is not a local (127.0.0.1) address, so it cannot be a CLI on this machine.</p>
+              )}
             </div>
-            <Button type="button" variant="primary" onPress={() => void authorizeCLI()}>
-              <KeyRound size={16} />
-              Authorize CLI
-            </Button>
+            <div className="primaryActions">
+              {cliCallbackURL ? (
+                <Button type="button" variant="primary" onPress={() => void authorizeCLI()}>
+                  <KeyRound size={16} />
+                  Authorize CLI
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                aria-label="Dismiss CLI authorization"
+                onPress={() => {
+                  setCliAuthRequest(null);
+                  window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+                }}
+              >
+                <X size={16} />
+              </Button>
+            </div>
           </div>
         ) : null}
         {activeTab === "skills" && selectedSkill ? (
@@ -508,7 +707,8 @@ export default function App() {
                     <Button
                       type="button"
                       aria-label="Copy skill"
-                      onPress={() => void copyText(selectedSkill.content, "Copied skill")}
+                      isDisabled={selectedContent === null}
+                      onPress={() => selectedContent !== null && void copyText(selectedContent, "Copied skill")}
                     >
                       <Clipboard size={18} />
                       Copy
@@ -549,14 +749,22 @@ export default function App() {
             <div className="libraryLayout">
               <section className="readerPane">
                 <div className="metaStrip">
-                  <span>{selectedSkill.content.length.toLocaleString()} chars</span>
-                  <span>{countWords(selectedSkill.content).toLocaleString()} words</span>
+                  {selectedContent !== null ? (
+                    <>
+                      <span>{selectedContent.length.toLocaleString()} chars</span>
+                      <span>{countWords(selectedContent).toLocaleString()} words</span>
+                    </>
+                  ) : (
+                    <span>Loading…</span>
+                  )}
                   <span>Updated {formatDate(selectedSkill.updated_at)}</span>
                 </div>
                 <article className="markdownDoc">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {displayMarkdown(selectedSkill.content)}
-                  </ReactMarkdown>
+                  {selectedContent !== null ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {displayMarkdown(selectedContent)}
+                    </ReactMarkdown>
+                  ) : null}
                 </article>
               </section>
             </div>
@@ -710,6 +918,73 @@ export default function App() {
                             Delete
                           </Button>
                         </div>
+                      </div>
+                    ))}
+                  </div>
+                </Card.Content>
+              </Card>
+            </div>
+          </>
+        ) : null}
+
+        {activeTab === "team" ? (
+          <>
+            <header className="mainHeader">
+              <div>
+                <p className="overline">Workspace access</p>
+                <h2>Team</h2>
+                <p className="summaryLine">
+                  {isWorkspaceOwner
+                    ? "Invite Whagons teammates by Google email. They sign in with Google and see all skills and credentials in this workspace."
+                    : `You are a member of ${me?.workspace_email || "this workspace"}. Only the workspace owner can manage members.`}
+                </p>
+              </div>
+            </header>
+            <div className="settingsLayout">
+              {isWorkspaceOwner ? (
+                <Card className="settingsCard">
+                  <Card.Content className="apiContent">
+                    <form className="credentialForm" onSubmit={(event) => void submitInvite(event)}>
+                      <Input
+                        fullWidth
+                        value={inviteEmail}
+                        onChange={(event) => setInviteEmail(event.target.value)}
+                        placeholder="teammate@whagons.com"
+                        type="email"
+                        required
+                      />
+                      <Button type="submit" variant="primary">
+                        <Plus size={16} />
+                        Invite member
+                      </Button>
+                    </form>
+                    <span className="mutedText">
+                      Invited members get full access to this workspace: skills, credentials, and API keys. Removing a member also revokes their active sessions.
+                    </span>
+                  </Card.Content>
+                </Card>
+              ) : null}
+
+              <Card className="settingsCard">
+                <Card.Content className="apiContent">
+                  <div className="keyList">
+                    {teamMembers.length === 0 ? (
+                      <span className="mutedText">No invited members yet. This workspace is only accessible to its owner.</span>
+                    ) : teamMembers.map((member) => (
+                      <div className="keyRow" key={member.id}>
+                        <div>
+                          <strong>{member.email}</strong>
+                          <span>Invited {formatDate(member.created_at)}</span>
+                        </div>
+                        {isWorkspaceOwner ? (
+                          <Button
+                            type="button"
+                            className="dangerButton"
+                            onPress={() => void dropMember(member)}
+                          >
+                            Remove
+                          </Button>
+                        ) : null}
                       </div>
                     ))}
                   </div>

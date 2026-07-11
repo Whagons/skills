@@ -1,12 +1,7 @@
 {
   "project": "skills",
-  "generatedAt": "2026-07-01T16:58:03.579017Z",
+  "generatedAt": "2026-07-11T05:28:51.169343Z",
   "functions": {
-    "agent.apiKeys.create": {
-      "kind": "mutation",
-      "handler": "AgentCreateAPIKey",
-      "file": "gonvex/skills.go"
-    },
     "agent.apiKeys.list": {
       "kind": "query",
       "handler": "AgentListAPIKeys",
@@ -82,6 +77,11 @@
       "handler": "Logout",
       "file": "gonvex/skills.go"
     },
+    "auth.me": {
+      "kind": "query",
+      "handler": "Me",
+      "file": "gonvex/skills.go"
+    },
     "credentials.delete": {
       "kind": "mutation",
       "handler": "DeleteCredential",
@@ -107,6 +107,11 @@
       "handler": "DeleteSkill",
       "file": "gonvex/skills.go"
     },
+    "skills.get": {
+      "kind": "query",
+      "handler": "GetSkill",
+      "file": "gonvex/skills.go"
+    },
     "skills.list": {
       "kind": "query",
       "handler": "ListSkills",
@@ -115,6 +120,21 @@
     "skills.save": {
       "kind": "mutation",
       "handler": "SaveSkill",
+      "file": "gonvex/skills.go"
+    },
+    "team.invite": {
+      "kind": "mutation",
+      "handler": "InviteTeamMember",
+      "file": "gonvex/skills.go"
+    },
+    "team.list": {
+      "kind": "query",
+      "handler": "ListTeamMembers",
+      "file": "gonvex/skills.go"
+    },
+    "team.remove": {
+      "kind": "mutation",
+      "handler": "RemoveTeamMember",
       "file": "gonvex/skills.go"
     }
   },
@@ -253,6 +273,11 @@
             "type": "string",
             "nullable": false,
             "primaryKey": false
+          },
+          "workspace_id": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
           }
         },
         "indexes": {
@@ -302,6 +327,50 @@
         "indexes": {
           "by_email": {
             "columns": [
+              "email"
+            ],
+            "unique": false
+          }
+        }
+      },
+      "skill_workspace_members": {
+        "columns": {
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "email": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
+          },
+          "invited_by": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "workspace_owner_id": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          }
+        },
+        "indexes": {
+          "by_email": {
+            "columns": [
+              "email"
+            ],
+            "unique": false
+          },
+          "by_workspace_email": {
+            "columns": [
+              "workspace_owner_id",
               "email"
             ],
             "unique": false
@@ -498,6 +567,11 @@
             "type": "string",
             "nullable": false,
             "primaryKey": false
+          },
+          "workspace_id": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
           }
         },
         "indexes": {
@@ -547,6 +621,50 @@
         "indexes": {
           "by_email": {
             "columns": [
+              "email"
+            ],
+            "unique": false
+          }
+        }
+      },
+      "skill_workspace_members": {
+        "columns": {
+          "created_at": {
+            "type": "time",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "email": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "id": {
+            "type": "id",
+            "nullable": false,
+            "primaryKey": true
+          },
+          "invited_by": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          },
+          "workspace_owner_id": {
+            "type": "string",
+            "nullable": false,
+            "primaryKey": false
+          }
+        },
+        "indexes": {
+          "by_email": {
+            "columns": [
+              "email"
+            ],
+            "unique": false
+          },
+          "by_workspace_email": {
+            "columns": [
+              "workspace_owner_id",
               "email"
             ],
             "unique": false

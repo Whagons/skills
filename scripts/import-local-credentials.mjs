@@ -37,7 +37,7 @@ try {
 }
 
 const localCredentials = JSON.parse(raw);
-const apiKey = process.env.WHAGONS_SKILLS_API_KEY || process.env.SKILLS_VAULT_API_KEY || "";
+const apiKey = process.env.WHAGONS_DEV_API_KEY || process.env.WHAGONS_SKILLS_API_KEY || process.env.SKILLS_VAULT_API_KEY || "";
 if (!apiKey) {
   console.error("Set WHAGONS_SKILLS_API_KEY to an API key created in the vault UI.");
   process.exit(1);

@@ -2,6 +2,8 @@ package backend
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
@@ -29,8 +32,7 @@ type SessionArgs struct {
 }
 
 type LoginArgs struct {
-	Password string `json:"password"`
-	IDToken  string `json:"idToken"`
+	IDToken string `json:"idToken"`
 }
 
 type LoginResult struct {
@@ -38,6 +40,30 @@ type LoginResult struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	Email        string    `json:"email"`
 	Name         string    `json:"name"`
+	IsOwner      bool      `json:"is_owner"`
+}
+
+type MeResult struct {
+	Email          string `json:"email"`
+	Name           string `json:"name"`
+	IsOwner        bool   `json:"is_owner"`
+	WorkspaceEmail string `json:"workspace_email"`
+}
+
+type InviteMemberArgs struct {
+	SessionToken string `json:"sessionToken"`
+	Email        string `json:"email"`
+}
+
+type RemoveMemberArgs struct {
+	SessionToken string `json:"sessionToken"`
+	ID           string `json:"id"`
+}
+
+type TeamMember struct {
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type SaveSkillArgs struct {
@@ -65,11 +91,6 @@ type AgentSaveSkillArgs struct {
 	Name    string `json:"name"`
 	Summary string `json:"summary"`
 	Content string `json:"content"`
-}
-
-type AgentCreateAPIKeyArgs struct {
-	APIKey string `json:"apiKey"`
-	Name   string `json:"name"`
 }
 
 type AgentRevokeAPIKeyArgs struct {
@@ -119,13 +140,17 @@ type AgentDeleteCredentialArgs struct {
 	ID     string `json:"id"`
 }
 
-type Skill struct {
+type SkillMeta struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Summary   string    `json:"summary"`
-	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Skill struct {
+	SkillMeta
+	Content string `json:"content"`
 }
 
 type CredentialMeta struct {
@@ -176,10 +201,20 @@ type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type execQueryer interface {
+	execer
+	queryer
+}
+
 func Register(app *gonvex.App) {
 	app.Mutation("auth.login", Login)
 	app.Mutation("auth.logout", Logout)
+	app.Query("auth.me", Me)
+	app.Query("team.list", ListTeamMembers)
+	app.Mutation("team.invite", InviteTeamMember)
+	app.Mutation("team.remove", RemoveTeamMember)
 	app.Query("skills.list", ListSkills)
+	app.Query("skills.get", GetSkill)
 	app.Mutation("skills.save", SaveSkill)
 	app.Mutation("skills.delete", DeleteSkill)
 	app.Query("apiKeys.list", ListAPIKeys)
@@ -194,7 +229,9 @@ func Register(app *gonvex.App) {
 	app.Mutation("agent.skills.upload", AgentUploadSkill)
 	app.Mutation("agent.skills.delete", AgentDeleteSkill)
 	app.Query("agent.apiKeys.list", AgentListAPIKeys)
-	app.Mutation("agent.apiKeys.create", AgentCreateAPIKey)
+	// Deliberately no agent.apiKeys.create: a leaked API key must not be able
+	// to mint replacement keys that survive its own revocation. New keys come
+	// from a Google-verified session (UI or CLI browser flow) only.
 	app.Mutation("agent.apiKeys.revoke", AgentRevokeAPIKey)
 	app.Query("agent.credentials.list", AgentListCredentials)
 	app.Query("agent.credentials.get", AgentGetCredential)
@@ -206,7 +243,7 @@ func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
 	if ctx.DB == nil {
 		return LoginResult{}, errors.New("database is not configured")
 	}
-	runner := execer(ctx.DB)
+	runner := execQueryer(ctx.DB)
 	if ctx.Tx != nil {
 		runner = ctx.Tx
 	}
@@ -214,7 +251,17 @@ func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
 		return LoginResult{}, err
 	}
 
-	ownerID, email, name, err := loginIdentity(ctx.Context, args)
+	info, err := verifyGoogleIDToken(ctx.Context, args.IDToken)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	email := strings.ToLower(strings.TrimSpace(info.Email))
+	name := strings.TrimSpace(info.Name)
+	if name == "" {
+		name = email
+	}
+	ownerID := "google:" + strings.TrimSpace(info.Subject)
+	workspaceID, err := resolveWorkspace(ctx.Context, runner, ownerID, email, info)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -229,16 +276,45 @@ func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
 	if err != nil {
 		return LoginResult{}, err
 	}
+	// Login is a natural, low-frequency place to prune session rows that
+	// expired long ago so the table does not grow forever.
+	if _, err := runner.ExecContext(ctx.Context, `delete from skill_sessions where expires_at < now() - interval '7 days'`); err != nil {
+		return LoginResult{}, err
+	}
 	now := time.Now().UTC()
 	expires := now.Add(sessionTTL)
 	_, err = runner.ExecContext(ctx.Context, `
-		insert into skill_sessions (id, owner_id, token_hash, created_at, expires_at)
-		values ($1, $2, $3, $4, $5)
-	`, mustRandomID(), ownerID, hashToken(token), now, expires)
+		insert into skill_sessions (id, owner_id, workspace_id, token_hash, created_at, expires_at)
+		values ($1, $2, $3, $4, $5, $6)
+	`, mustRandomID(), ownerID, workspaceID, hashToken(token), now, expires)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return LoginResult{SessionToken: token, ExpiresAt: expires, Email: email, Name: name}, nil
+	return LoginResult{SessionToken: token, ExpiresAt: expires, Email: email, Name: name, IsOwner: ownerID == workspaceID}, nil
+}
+
+// resolveWorkspace decides whose data this login can access. An invited team
+// member joins the inviter's workspace; otherwise an allowlisted account owns
+// its own workspace.
+func resolveWorkspace(ctx context.Context, runner queryer, ownerID string, email string, info googleTokenInfo) (string, error) {
+	var workspaceID string
+	err := runner.QueryRowContext(ctx, `
+		select workspace_owner_id
+		from skill_workspace_members
+		where email = $1
+		order by created_at desc
+		limit 1
+	`, email).Scan(&workspaceID)
+	if err == nil && strings.TrimSpace(workspaceID) != "" && workspaceID != ownerID {
+		return workspaceID, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if identityAllowed(info) {
+		return ownerID, nil
+	}
+	return "", errors.New("google account is not allowed for this vault")
 }
 
 func Logout(ctx *gonvex.MutationCtx, args SessionArgs) (DeleteResult, error) {
@@ -260,12 +336,146 @@ func Logout(ctx *gonvex.MutationCtx, args SessionArgs) (DeleteResult, error) {
 	return DeleteResult{Deleted: count > 0}, nil
 }
 
-func ListSkills(ctx *gonvex.QueryCtx, args SessionArgs) ([]Skill, error) {
+func Me(ctx *gonvex.QueryCtx, args SessionArgs) (MeResult, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return MeResult{}, err
+	}
+	result := MeResult{IsOwner: identity.IsWorkspaceOwner()}
+	result.Email, result.Name, _ = lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if !result.IsOwner {
+		result.WorkspaceEmail, _, _ = lookupUser(ctx.Context, ctx.DB, identity.WorkspaceID)
+	}
+	return result, nil
+}
+
+func lookupUser(ctx context.Context, db queryer, ownerID string) (string, string, error) {
+	var email, name string
+	err := db.QueryRowContext(ctx, `select email, name from skill_users where owner_id = $1`, ownerID).Scan(&email, &name)
+	return email, name, err
+}
+
+func ListTeamMembers(ctx *gonvex.QueryCtx, args SessionArgs) ([]TeamMember, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ctx.DB.QueryContext(ctx.Context, `
+		select id, email, created_at
+		from skill_workspace_members
+		where workspace_owner_id = $1
+		order by created_at desc
+	`, identity.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := []TeamMember{}
+	for rows.Next() {
+		var member TeamMember
+		if err := rows.Scan(&member.ID, &member.Email, &member.CreatedAt); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
+func InviteTeamMember(ctx *gonvex.MutationCtx, args InviteMemberArgs) (TeamMember, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return TeamMember{}, err
+	}
+	if !identity.IsWorkspaceOwner() {
+		return TeamMember{}, errors.New("only the workspace owner can invite members")
+	}
+	email := strings.ToLower(strings.TrimSpace(args.Email))
+	if !strings.Contains(email, "@") || strings.ContainsAny(email, " ,") {
+		return TeamMember{}, errors.New("a valid google email is required")
+	}
+	runner := mutationRunner(ctx)
+	if err := ensureTables(ctx.Context, runner); err != nil {
+		return TeamMember{}, err
+	}
+	id, err := randomID()
+	if err != nil {
+		return TeamMember{}, err
+	}
+	now := time.Now().UTC()
+	_, err = runner.ExecContext(ctx.Context, `
+		insert into skill_workspace_members (id, workspace_owner_id, email, invited_by, created_at)
+		values ($1, $2, $3, $4, $5)
+		on conflict (workspace_owner_id, email) do nothing
+	`, id, identity.WorkspaceID, email, identity.OwnerID, now)
+	if err != nil {
+		return TeamMember{}, err
+	}
+	return TeamMember{ID: id, Email: email, CreatedAt: now}, nil
+}
+
+func RemoveTeamMember(ctx *gonvex.MutationCtx, args RemoveMemberArgs) (DeleteResult, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	if !identity.IsWorkspaceOwner() {
+		return DeleteResult{}, errors.New("only the workspace owner can remove members")
+	}
+	id := strings.TrimSpace(args.ID)
+	if id == "" {
+		return DeleteResult{}, errors.New("member id is required")
+	}
+	runner := mutationRunner(ctx)
+	var email string
+	err = ctx.DB.QueryRowContext(ctx.Context, `
+		select email from skill_workspace_members where workspace_owner_id = $1 and id = $2
+	`, identity.WorkspaceID, id).Scan(&email)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DeleteResult{Deleted: false}, nil
+		}
+		return DeleteResult{}, err
+	}
+	if _, err := runner.ExecContext(ctx.Context, `
+		delete from skill_workspace_members where workspace_owner_id = $1 and id = $2
+	`, identity.WorkspaceID, id); err != nil {
+		return DeleteResult{}, err
+	}
+	// Revoke the removed member's live sessions in this workspace so removal
+	// takes effect immediately, not at session expiry.
+	_, err = runner.ExecContext(ctx.Context, `
+		update skill_sessions set revoked_at = now()
+		where revoked_at is null
+			and workspace_id = $1
+			and owner_id in (select owner_id from skill_users where lower(email) = $2)
+			and owner_id <> $1
+	`, identity.WorkspaceID, email)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	return DeleteResult{Deleted: true}, nil
+}
+
+func ListSkills(ctx *gonvex.QueryCtx, args SessionArgs) ([]SkillMeta, error) {
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return nil, err
 	}
 	return listSkills(ctx.Context, ctx.DB, ownerID)
+}
+
+type GetSkillArgs struct {
+	SessionToken string `json:"sessionToken"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+}
+
+func GetSkill(ctx *gonvex.QueryCtx, args GetSkillArgs) (Skill, error) {
+	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return Skill{}, err
+	}
+	return getSkill(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
 }
 
 func SaveSkill(ctx *gonvex.MutationCtx, args SaveSkillArgs) (Skill, error) {
@@ -412,7 +622,7 @@ func SaveCredential(ctx *gonvex.MutationCtx, args SaveCredentialArgs) (Credentia
 	return saveCredential(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Value)
 }
 
-func saveCredential(ctx context.Context, runner execer, ownerID string, credentialID string, credentialName string, credentialSummary string, credentialValue string) (CredentialMeta, error) {
+func saveCredential(ctx context.Context, runner execQueryer, ownerID string, credentialID string, credentialName string, credentialSummary string, credentialValue string) (CredentialMeta, error) {
 	name := strings.TrimSpace(credentialName)
 	value := strings.TrimSpace(credentialValue)
 	if name == "" {
@@ -422,6 +632,10 @@ func saveCredential(ctx context.Context, runner execer, ownerID string, credenti
 		return CredentialMeta{}, errors.New("credential value is required")
 	}
 	if err := ensureTables(ctx, runner); err != nil {
+		return CredentialMeta{}, err
+	}
+	storedValue, err := encryptSecret(value)
+	if err != nil {
 		return CredentialMeta{}, err
 	}
 	id := strings.TrimSpace(credentialID)
@@ -434,7 +648,8 @@ func saveCredential(ctx context.Context, runner execer, ownerID string, credenti
 	}
 	id = scopedID(ownerID, id)
 	now := time.Now().UTC()
-	_, err := runner.ExecContext(ctx, `
+	var createdAt time.Time
+	err = runner.QueryRowContext(ctx, `
 		insert into skill_credentials (id, owner_id, name, summary, secret_value, created_at, updated_at)
 		values ($1, $2, $3, $4, $5, $6, $6)
 		on conflict (id) do update set
@@ -442,11 +657,12 @@ func saveCredential(ctx context.Context, runner execer, ownerID string, credenti
 			summary = excluded.summary,
 			secret_value = excluded.secret_value,
 			updated_at = excluded.updated_at
-	`, id, ownerID, name, strings.TrimSpace(credentialSummary), value, now)
+		returning created_at
+	`, id, ownerID, name, strings.TrimSpace(credentialSummary), storedValue, now).Scan(&createdAt)
 	if err != nil {
 		return CredentialMeta{}, err
 	}
-	return CredentialMeta{ID: id, Name: name, Summary: strings.TrimSpace(credentialSummary), CreatedAt: now, UpdatedAt: now}, nil
+	return CredentialMeta{ID: id, Name: name, Summary: strings.TrimSpace(credentialSummary), CreatedAt: createdAt, UpdatedAt: now}, nil
 }
 
 func DeleteCredential(ctx *gonvex.MutationCtx, args DeleteCredentialArgs) (DeleteResult, error) {
@@ -473,7 +689,7 @@ func deleteCredential(ctx context.Context, runner execer, ownerID string, creden
 	return DeleteResult{Deleted: count > 0}, nil
 }
 
-func AgentListSkills(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]Skill, error) {
+func AgentListSkills(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]SkillMeta, error) {
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
 	if err != nil {
 		return nil, err
@@ -511,14 +727,6 @@ func AgentListAPIKeys(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]APIKeyRecord
 		return nil, err
 	}
 	return listAPIKeys(ctx.Context, ctx.DB, ownerID)
-}
-
-func AgentCreateAPIKey(ctx *gonvex.MutationCtx, args AgentCreateAPIKeyArgs) (CreateAPIKeyResult, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
-	if err != nil {
-		return CreateAPIKeyResult{}, err
-	}
-	return createAPIKey(ctx.Context, mutationRunner(ctx), ownerID, args.Name)
 }
 
 func AgentRevokeAPIKey(ctx *gonvex.MutationCtx, args AgentRevokeAPIKeyArgs) (DeleteResult, error) {
@@ -566,6 +774,11 @@ func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, n
 		}
 		return Credential{}, err
 	}
+	value, err := decryptSecret(credential.Value)
+	if err != nil {
+		return Credential{}, err
+	}
+	credential.Value = value
 	return credential, nil
 }
 
@@ -585,15 +798,17 @@ func AgentDeleteCredential(ctx *gonvex.MutationCtx, args AgentDeleteCredentialAr
 	return deleteCredential(ctx.Context, mutationRunner(ctx), ownerID, args.ID)
 }
 
-func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]Skill, error) {
+// listSkills intentionally returns metadata only; fetch content per skill via
+// skills.get / agent.skills.get so lists stay cheap as the vault grows.
+func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]SkillMeta, error) {
 	if db == nil {
-		return []Skill{}, nil
+		return []SkillMeta{}, nil
 	}
 	if err := ensureTables(ctx, db); err != nil {
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		select id, name, summary, content, created_at, updated_at
+		select id, name, summary, created_at, updated_at
 		from skills
 		where owner_id = $1
 		order by lower(name), updated_at desc
@@ -603,13 +818,13 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]Skill, error
 	}
 	defer rows.Close()
 
-	byKey := map[string]Skill{}
+	byKey := map[string]SkillMeta{}
 	for rows.Next() {
-		var skill Skill
-		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.Content, &skill.CreatedAt, &skill.UpdatedAt); err != nil {
+		var skill SkillMeta
+		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.CreatedAt, &skill.UpdatedAt); err != nil {
 			return nil, err
 		}
-		key := skillIdentityKey(skill)
+		key := skillIdentityKey(skill.ID, skill.Name)
 		if current, ok := byKey[key]; !ok || skill.UpdatedAt.After(current.UpdatedAt) {
 			byKey[key] = skill
 		}
@@ -617,7 +832,7 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]Skill, error
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	skills := make([]Skill, 0, len(byKey))
+	skills := make([]SkillMeta, 0, len(byKey))
 	for _, skill := range byKey {
 		skills = append(skills, skill)
 	}
@@ -656,7 +871,7 @@ func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name s
 	return skill, nil
 }
 
-func saveSkill(ctx context.Context, runner execer, ownerID string, id string, name string, summary string, content string) (Skill, error) {
+func saveSkill(ctx context.Context, runner execQueryer, ownerID string, id string, name string, summary string, content string) (Skill, error) {
 	name = strings.TrimSpace(name)
 	content = strings.TrimSpace(content)
 	if name == "" {
@@ -679,7 +894,8 @@ func saveSkill(ctx context.Context, runner execer, ownerID string, id string, na
 		id = nextID
 	}
 	id = existingSkillID(ctx, runner, ownerID, id, name)
-	_, err := runner.ExecContext(ctx, `
+	var createdAt time.Time
+	err := runner.QueryRowContext(ctx, `
 		insert into skills (id, owner_id, name, summary, content, created_at, updated_at)
 		values ($1, $2, $3, $4, $5, $6, $6)
 		on conflict (id) do update set
@@ -687,11 +903,15 @@ func saveSkill(ctx context.Context, runner execer, ownerID string, id string, na
 			summary = excluded.summary,
 			content = excluded.content,
 			updated_at = excluded.updated_at
-	`, id, ownerID, name, strings.TrimSpace(summary), content, now)
+		returning created_at
+	`, id, ownerID, name, strings.TrimSpace(summary), content, now).Scan(&createdAt)
 	if err != nil {
 		return Skill{}, err
 	}
-	return Skill{ID: id, Name: name, Summary: strings.TrimSpace(summary), Content: content, CreatedAt: now, UpdatedAt: now}, nil
+	return Skill{
+		SkillMeta: SkillMeta{ID: id, Name: name, Summary: strings.TrimSpace(summary), CreatedAt: createdAt, UpdatedAt: now},
+		Content:   content,
+	}, nil
 }
 
 func existingSkillID(ctx context.Context, runner execer, ownerID string, id string, name string) string {
@@ -725,8 +945,8 @@ func existingSkillID(ctx context.Context, runner execer, ownerID string, id stri
 	return scoped
 }
 
-func skillIdentityKey(skill Skill) string {
-	id := strings.TrimSpace(skill.ID)
+func skillIdentityKey(skillID string, skillName string) string {
+	id := strings.TrimSpace(skillID)
 	if index := strings.Index(id, "_"); index == 12 && len(id) > 13 {
 		id = id[index+1:]
 	}
@@ -735,7 +955,7 @@ func skillIdentityKey(skill Skill) string {
 	if id != "" {
 		return strings.ToLower(id)
 	}
-	return strings.ToLower(strings.TrimSpace(skill.Name))
+	return strings.ToLower(strings.TrimSpace(skillName))
 }
 
 func deleteSkill(ctx context.Context, runner execer, ownerID string, id string) (DeleteResult, error) {
@@ -782,16 +1002,23 @@ func listCredentialMeta(ctx context.Context, db *sql.DB, ownerID string) ([]Cred
 	return credentials, rows.Err()
 }
 
-func mutationRunner(ctx *gonvex.MutationCtx) execer {
+func mutationRunner(ctx *gonvex.MutationCtx) execQueryer {
 	if ctx.Tx != nil {
 		return ctx.Tx
 	}
 	return ctx.DB
 }
 
+// ensureTablesDone skips schema DDL after the first successful run so every
+// query/mutation is not paying for ~20 idempotent statements.
+var ensureTablesDone atomic.Bool
+
 func ensureTables(ctx context.Context, db execer) error {
 	if db == nil {
 		return errors.New("database is not configured")
+	}
+	if ensureTablesDone.Load() {
+		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -839,52 +1066,84 @@ func ensureTables(ctx context.Context, db execer) error {
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		)`,
+		`create table if not exists skill_workspace_members (
+			id text primary key,
+			workspace_owner_id text not null,
+			email text not null,
+			invited_by text not null default '',
+			created_at timestamptz not null default now()
+		)`,
 		`alter table skills add column if not exists owner_id text not null default ''`,
 		`alter table skill_api_keys add column if not exists owner_id text not null default ''`,
 		`alter table skill_sessions add column if not exists owner_id text not null default ''`,
+		`alter table skill_sessions add column if not exists workspace_id text not null default ''`,
 		`alter table skill_credentials add column if not exists owner_id text not null default ''`,
 		`create index if not exists skills_by_owner_name on skills(owner_id, lower(name))`,
 		`create index if not exists skills_by_owner_updated_at on skills(owner_id, updated_at)`,
 		`create index if not exists skill_api_keys_by_owner_created_at on skill_api_keys(owner_id, created_at)`,
 		`create index if not exists skill_sessions_by_owner_token_hash on skill_sessions(owner_id, token_hash)`,
 		`create index if not exists skill_credentials_by_owner_name on skill_credentials(owner_id, lower(name))`,
+		`create unique index if not exists skill_workspace_members_unique on skill_workspace_members(workspace_owner_id, email)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
+	ensureTablesDone.Store(true)
 	return nil
 }
 
+type sessionIdentity struct {
+	OwnerID     string
+	WorkspaceID string
+}
+
+func (s sessionIdentity) IsWorkspaceOwner() bool {
+	return s.OwnerID == s.WorkspaceID
+}
+
+// verifySession returns the workspace id the session may read and write.
+// For invited team members this is the inviter's workspace, not their own id.
 func verifySession(ctx context.Context, db *sql.DB, token string) (string, error) {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", errors.New("session token is required")
-	}
-	if db == nil {
-		return "", errors.New("database is not configured")
-	}
-	if err := ensureTables(ctx, db); err != nil {
+	identity, err := verifySessionIdentity(ctx, db, token)
+	if err != nil {
 		return "", err
 	}
-	var ownerID string
+	return identity.WorkspaceID, nil
+}
+
+func verifySessionIdentity(ctx context.Context, db *sql.DB, token string) (sessionIdentity, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return sessionIdentity{}, errors.New("session token is required")
+	}
+	if db == nil {
+		return sessionIdentity{}, errors.New("database is not configured")
+	}
+	if err := ensureTables(ctx, db); err != nil {
+		return sessionIdentity{}, err
+	}
+	var ownerID, workspaceID string
 	err := db.QueryRowContext(ctx, `
-		select owner_id
+		select owner_id, coalesce(workspace_id, '')
 		from skill_sessions
 		where token_hash = $1 and revoked_at is null and expires_at > now()
 		limit 1
-	`, hashToken(token)).Scan(&ownerID)
+	`, hashToken(token)).Scan(&ownerID, &workspaceID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", errors.New("invalid session")
+			return sessionIdentity{}, errors.New("invalid session")
 		}
-		return "", err
+		return sessionIdentity{}, err
 	}
 	if strings.TrimSpace(ownerID) == "" {
-		return "", errors.New("invalid session owner")
+		return sessionIdentity{}, errors.New("invalid session owner")
 	}
-	return ownerID, nil
+	if strings.TrimSpace(workspaceID) == "" {
+		workspaceID = ownerID
+	}
+	return sessionIdentity{OwnerID: ownerID, WorkspaceID: workspaceID}, nil
 }
 
 func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string) (string, error) {
@@ -912,39 +1171,10 @@ func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string) (string, error
 	return ownerID, nil
 }
 
-func loginIdentity(ctx context.Context, args LoginArgs) (string, string, string, error) {
-	if strings.TrimSpace(args.IDToken) != "" {
-		info, err := verifyGoogleIDToken(ctx, args.IDToken)
-		if err != nil {
-			return "", "", "", err
-		}
-		email := strings.ToLower(strings.TrimSpace(info.Email))
-		name := strings.TrimSpace(info.Name)
-		if name == "" {
-			name = email
-		}
-		return "google:" + strings.TrimSpace(info.Subject), email, name, nil
-	}
-
-	passwordHash, err := configuredPasswordHash()
-	if err != nil {
-		return "", "", "", err
-	}
-	if hashPassword(args.Password) != passwordHash {
-		return "", "", "", errors.New("invalid password")
-	}
-	email := strings.ToLower(strings.TrimSpace(os.Getenv("SKILLS_LEGACY_OWNER_EMAIL")))
-	if email == "" {
-		email = "legacy@skills.whagons.com"
-	}
-	ownerID := strings.TrimSpace(os.Getenv("SKILLS_LEGACY_OWNER_ID"))
-	if ownerID == "" {
-		ownerID = "legacy:" + hashToken(email)[:16]
-	}
-	return ownerID, email, "Legacy owner", nil
-}
-
 func verifyGoogleIDToken(ctx context.Context, idToken string) (googleTokenInfo, error) {
+	if strings.TrimSpace(idToken) == "" {
+		return googleTokenInfo{}, errors.New("google id token is required")
+	}
 	clientID := strings.TrimSpace(os.Getenv("SKILLS_GOOGLE_CLIENT_ID"))
 	if clientID == "" {
 		clientID = defaultGoogleClientID
@@ -974,9 +1204,6 @@ func verifyGoogleIDToken(ctx context.Context, idToken string) (googleTokenInfo, 
 	}
 	if strings.ToLower(info.EmailVerified) != "true" {
 		return googleTokenInfo{}, errors.New("google email is not verified")
-	}
-	if !identityAllowed(info) {
-		return googleTokenInfo{}, errors.New("google account is not allowed for this vault")
 	}
 	return info, nil
 }
@@ -1067,20 +1294,80 @@ func scopedID(ownerID string, id string) string {
 	return prefix + id
 }
 
-func hashPassword(password string) string {
-	return hashToken(os.Getenv("SKILLS_PASSWORD_SALT") + ":" + password)
-}
-
-func configuredPasswordHash() (string, error) {
-	if strings.TrimSpace(os.Getenv("SKILLS_PASSWORD_SALT")) == "" || strings.TrimSpace(os.Getenv("SKILLS_PASSWORD_HASH")) == "" {
-		return "", errors.New("skills password is not configured")
-	}
-	return strings.TrimSpace(os.Getenv("SKILLS_PASSWORD_HASH")), nil
-}
-
 func hashToken(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+// Credential values are encrypted at rest with AES-256-GCM when
+// SKILLS_SECRET_KEY is configured, so a database dump alone does not expose
+// secrets. Legacy plaintext rows (no prefix) are still readable and get
+// re-encrypted the next time they are saved.
+const encryptedValuePrefix = "encv1:"
+
+func credentialAEAD() (cipher.AEAD, error) {
+	raw := strings.TrimSpace(os.Getenv("SKILLS_SECRET_KEY"))
+	if raw == "" {
+		return nil, nil
+	}
+	var key []byte
+	if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) == 32 {
+		key = decoded
+	} else if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		key = decoded
+	} else if decoded, err := base64.RawStdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		key = decoded
+	} else {
+		// Any other passphrase is stretched to 32 bytes.
+		sum := sha256.Sum256([]byte(raw))
+		key = sum[:]
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func encryptSecret(value string) (string, error) {
+	aead, err := credentialAEAD()
+	if err != nil {
+		return "", err
+	}
+	if aead == nil {
+		return value, nil
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+	sealed := aead.Seal(nonce, nonce, []byte(value), nil)
+	return encryptedValuePrefix + base64.RawStdEncoding.EncodeToString(sealed), nil
+}
+
+func decryptSecret(value string) (string, error) {
+	if !strings.HasPrefix(value, encryptedValuePrefix) {
+		return value, nil
+	}
+	aead, err := credentialAEAD()
+	if err != nil {
+		return "", err
+	}
+	if aead == nil {
+		return "", errors.New("credential is encrypted but SKILLS_SECRET_KEY is not configured")
+	}
+	sealed, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, encryptedValuePrefix))
+	if err != nil {
+		return "", err
+	}
+	if len(sealed) < aead.NonceSize() {
+		return "", errors.New("encrypted credential is malformed")
+	}
+	plain, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], nil)
+	if err != nil {
+		return "", errors.New("credential decryption failed")
+	}
+	return string(plain), nil
 }
 
 func randomID() (string, error) {

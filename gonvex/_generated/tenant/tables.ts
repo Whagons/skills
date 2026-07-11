@@ -133,6 +133,11 @@ export const tables = {
         "type": "string",
         "nullable": false,
         "primaryKey": false
+      },
+      "workspace_id": {
+        "type": "string",
+        "nullable": false,
+        "primaryKey": false
       }
     },
     "indexes": {
@@ -182,6 +187,50 @@ export const tables = {
     "indexes": {
       "by_email": {
         "columns": [
+          "email"
+        ],
+        "unique": false
+      }
+    }
+  },
+  "skill_workspace_members": {
+    "columns": {
+      "created_at": {
+        "type": "time",
+        "nullable": false,
+        "primaryKey": false
+      },
+      "email": {
+        "type": "string",
+        "nullable": false,
+        "primaryKey": false
+      },
+      "id": {
+        "type": "id",
+        "nullable": false,
+        "primaryKey": true
+      },
+      "invited_by": {
+        "type": "string",
+        "nullable": false,
+        "primaryKey": false
+      },
+      "workspace_owner_id": {
+        "type": "string",
+        "nullable": false,
+        "primaryKey": false
+      }
+    },
+    "indexes": {
+      "by_email": {
+        "columns": [
+          "email"
+        ],
+        "unique": false
+      },
+      "by_workspace_email": {
+        "columns": [
+          "workspace_owner_id",
           "email"
         ],
         "unique": false

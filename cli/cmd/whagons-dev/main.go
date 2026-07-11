@@ -56,11 +56,6 @@ type APIKeyRecord struct {
 	RevokedAt *string `json:"revoked_at,omitempty"`
 }
 
-type CreateAPIKeyResult struct {
-	Record APIKeyRecord `json:"record"`
-	APIKey string       `json:"apiKey"`
-}
-
 type CredentialMeta struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -128,31 +123,31 @@ func run(args []string) error {
 }
 
 func usage() {
-	fmt.Print(`whagons-skills
+	fmt.Print(`whagons-dev — Whagons developer CLI for the Skills Vault
 
 Usage:
-  whagons-skills auth login [--app-url URL]
-  whagons-skills auth status
-  whagons-skills auth logout
-  whagons-skills skills list
-  whagons-skills skills get <name-or-id> [--output FILE]
-  whagons-skills skills copy <name-or-id>
-  whagons-skills skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
-  whagons-skills skills sync <DIR>
-  whagons-skills skills install-codex [--dir DIR]
-  whagons-skills skills update-codex [--dir DIR]
-  whagons-skills skills delete <name-or-id>
-  whagons-skills api-keys list
-  whagons-skills api-keys create [name]
-  whagons-skills api-keys revoke <id>
-  whagons-skills credentials list
-  whagons-skills credentials set <name> [--summary TEXT] [--value-stdin]
-  whagons-skills credentials delete <id>
-  whagons-skills credentials exec <name> [--prefix PREFIX] -- <command> [args...]
+  whagons-dev auth login [--app-url URL]
+  whagons-dev auth set-key --stdin        (pipe a key minted in the vault UI)
+  whagons-dev auth status
+  whagons-dev auth logout
+  whagons-dev skills list
+  whagons-dev skills get <name-or-id> [--output FILE]
+  whagons-dev skills copy <name-or-id>
+  whagons-dev skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
+  whagons-dev skills sync <DIR>
+  whagons-dev skills install-codex [--dir DIR]
+  whagons-dev skills update-codex [--dir DIR]
+  whagons-dev skills delete <name-or-id>
+  whagons-dev api-keys list
+  whagons-dev api-keys revoke <id>
+  whagons-dev credentials list
+  whagons-dev credentials set <name> [--summary TEXT] [--value-stdin]
+  whagons-dev credentials delete <id>
+  whagons-dev credentials exec <name> [--prefix PREFIX] -- <command> [args...]
 
 What it does:
-  - Authenticates by opening the Skills Vault in your browser.
-  - Lists, copies, uploads, and deletes your personal cloud skills.
+  - Authenticates itself by opening the Skills Vault in your browser (automatic on first use).
+  - Lists, copies, uploads, and deletes your workspace's cloud skills.
   - Installs or updates cloud skills into Codex-compatible SKILL.md folders.
   - Stores project credentials and injects them into child processes without printing them.
 
@@ -171,12 +166,58 @@ func runAuth(command string, args []string) error {
 		return browserLogin(*appURL)
 	case "status":
 		config, _ := readConfig()
-		if config.APIKey == "" {
-			fmt.Println("Not logged in")
+		apiKey := firstNonEmpty(envValue("API_KEY"), config.APIKey)
+		if apiKey == "" {
+			fmt.Println("Not logged in — run any command and the browser flow starts automatically.")
 			return nil
 		}
+		prefix := apiKey
+		if len(prefix) > 14 {
+			prefix = prefix[:14]
+		}
 		project := firstNonEmpty(config.Project, defaultProject)
-		fmt.Printf("Logged in (%s)\n", project)
+		fmt.Printf("Logged in (project %s, key %s...)\n", project, prefix)
+		return nil
+	case "set-key":
+		// Persists a key minted by a human in the vault UI. Agents cannot mint
+		// keys themselves (no agent.apiKeys.create), but they can store one
+		// they were handed.
+		fs := flag.NewFlagSet("auth set-key", flag.ContinueOnError)
+		valueStdin := fs.Bool("stdin", false, "read the API key from stdin")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if !*valueStdin {
+			return errors.New(`use --stdin so the key stays out of shell history: printf '%s' "$KEY" | whagons-dev auth set-key --stdin`)
+		}
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		apiKey := strings.TrimSpace(string(data))
+		if apiKey == "" {
+			return errors.New("no API key received on stdin")
+		}
+		config, _ := readConfig()
+		wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
+		project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
+		client, err := NewClient(wsURLWithProject(wsURL, project), project)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		var keys []APIKeyRecord
+		if err := client.Query("agent.apiKeys.list", map[string]any{"apiKey": apiKey}, &keys); err != nil {
+			return fmt.Errorf("the vault rejected this API key: %v", err)
+		}
+		config.APIKey = apiKey
+		config.WSURL = wsURL
+		config.Project = project
+		config.AppURL = firstNonEmpty(config.AppURL, defaultAppURL)
+		if err := writeConfig(config); err != nil {
+			return err
+		}
+		fmt.Println("API key verified and saved to " + configPath())
 		return nil
 	case "logout":
 		if err := writeConfig(Config{}); err != nil {
@@ -318,16 +359,7 @@ func runAPIKeys(client *Client, apiKey, command string, args []string) error {
 		}
 		return nil
 	case "create":
-		name := strings.TrimSpace(strings.Join(args, " "))
-		if name == "" {
-			name = "CLI-created key"
-		}
-		var result CreateAPIKeyResult
-		if err := client.Mutation("agent.apiKeys.create", map[string]any{"apiKey": apiKey, "name": name}, &result); err != nil {
-			return err
-		}
-		fmt.Println(result.APIKey)
-		return nil
+		return errors.New("api-keys create was removed: an API key cannot mint new keys. Create keys from a Google session — run: whagons-dev auth login")
 	case "revoke":
 		if len(args) < 1 {
 			return errors.New("missing API key id")
@@ -429,14 +461,28 @@ func runCredentials(client *Client, apiKey, command string, args []string) error
 	}
 }
 
+// envValue reads WHAGONS_DEV_<suffix>, falling back to the legacy
+// WHAGONS_SKILLS_<suffix> name.
+func envValue(suffix string) string {
+	return firstNonEmpty(os.Getenv("WHAGONS_DEV_"+suffix), os.Getenv("WHAGONS_SKILLS_"+suffix))
+}
+
 func withClient(fn func(*Client, string, Config) error) error {
 	config, _ := readConfig()
-	apiKey := firstNonEmpty(os.Getenv("WHAGONS_SKILLS_API_KEY"), config.APIKey)
+	apiKey := firstNonEmpty(envValue("API_KEY"), config.APIKey)
 	if apiKey == "" {
-		return errors.New("not logged in. Run: whagons-skills auth login")
+		fmt.Fprintln(os.Stderr, "Not logged in — opening the Skills Vault in your browser to authorize this CLI...")
+		if err := browserLogin(""); err != nil {
+			return fmt.Errorf("browser login failed: %w (or set WHAGONS_DEV_API_KEY)", err)
+		}
+		config, _ = readConfig()
+		apiKey = config.APIKey
+		if apiKey == "" {
+			return errors.New("not logged in. Run: whagons-dev auth login")
+		}
 	}
-	wsURL := firstNonEmpty(os.Getenv("WHAGONS_SKILLS_WS_URL"), config.WSURL, defaultWSURL)
-	project := firstNonEmpty(os.Getenv("WHAGONS_SKILLS_PROJECT"), config.Project, defaultProject)
+	wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
+	project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
 	client, err := NewClient(wsURLWithProject(wsURL, project), project)
 	if err != nil {
 		return err
@@ -552,9 +598,17 @@ func decodeResult(value any, out any) error {
 	return json.Unmarshal(data, out)
 }
 
+type authCallbackPayload struct {
+	APIKey  string `json:"api_key"`
+	State   string `json:"state"`
+	Project string `json:"project"`
+	WSURL   string `json:"ws_url"`
+	AppURL  string `json:"app_url"`
+}
+
 func browserLogin(appURL string) error {
 	config, _ := readConfig()
-	appURL = firstNonEmpty(appURL, os.Getenv("WHAGONS_SKILLS_APP_URL"), config.AppURL, defaultAppURL)
+	appURL = firstNonEmpty(appURL, envValue("APP_URL"), config.AppURL, defaultAppURL)
 	state := randomID()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -562,30 +616,55 @@ func browserLogin(appURL string) error {
 	}
 	defer listener.Close()
 	resultCh := make(chan Config, 1)
-	errCh := make(chan error, 1)
 	server := &http.Server{}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The vault page POSTs the key cross-origin from https, so the
+		// loopback server must answer the CORS preflight.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		if r.URL.Path != "/callback" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Query().Get("state") != state {
-			errCh <- errors.New("browser auth state mismatch")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		payload := authCallbackPayload{
+			APIKey:  r.URL.Query().Get("api_key"),
+			State:   r.URL.Query().Get("state"),
+			Project: r.URL.Query().Get("project"),
+			WSURL:   r.URL.Query().Get("ws_url"),
+			AppURL:  r.URL.Query().Get("app_url"),
+		}
+		if r.Method == http.MethodPost {
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+				http.Error(w, "invalid payload", http.StatusBadRequest)
+				return
+			}
+		}
+		// A wrong state or missing key is a stray request, not the vault;
+		// reject it and keep waiting for the real callback.
+		if payload.State != state {
 			http.Error(w, "state mismatch", http.StatusBadRequest)
 			return
 		}
-		apiKey := r.URL.Query().Get("api_key")
-		if apiKey == "" {
-			errCh <- errors.New("browser auth did not return an API key")
+		if payload.APIKey == "" {
 			http.Error(w, "missing api key", http.StatusBadRequest)
 			return
 		}
-		fmt.Fprint(w, "<h1>Whagons Skills CLI authorized</h1><p>You can close this tab.</p>")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<!doctype html><meta charset="utf-8"><title>whagons-dev authorized</title>
+<body style="font-family:system-ui;background:#0b1117;color:#f7fffb;display:grid;place-items:center;height:100vh;margin:0">
+<div style="text-align:center"><h1 style="margin:0 0 8px">whagons-dev is authorized</h1>
+<p style="color:#9db3aa;margin:0">You can close this tab and return to your terminal.</p></div></body>`)
 		resultCh <- Config{
-			APIKey:  apiKey,
-			AppURL:  firstNonEmpty(r.URL.Query().Get("app_url"), appURL),
-			WSURL:   firstNonEmpty(r.URL.Query().Get("ws_url"), defaultWSURL),
-			Project: firstNonEmpty(r.URL.Query().Get("project"), defaultProject),
+			APIKey:  payload.APIKey,
+			AppURL:  firstNonEmpty(payload.AppURL, appURL),
+			WSURL:   firstNonEmpty(payload.WSURL, defaultWSURL),
+			Project: firstNonEmpty(payload.Project, defaultProject),
 		}
 	})
 	go func() {
@@ -599,9 +678,10 @@ func browserLogin(appURL string) error {
 	q := loginURL.Query()
 	q.Set("cli_callback", callback)
 	q.Set("cli_state", state)
-	q.Set("cli_name", "Whagons Skills CLI")
+	q.Set("cli_name", "Whagons Dev CLI")
 	loginURL.RawQuery = q.Encode()
 	fmt.Printf("Opening browser: %s\n", loginURL.String())
+	fmt.Println("Sign in with Google, then click \"Authorize CLI\".")
 	if err := openBrowser(loginURL.String()); err != nil {
 		fmt.Printf("Open this URL manually: %s\n", loginURL.String())
 	}
@@ -611,11 +691,8 @@ func browserLogin(appURL string) error {
 		if err := writeConfig(result); err != nil {
 			return err
 		}
-		fmt.Println("Logged in. API key saved locally.")
+		fmt.Println("Logged in. API key saved to " + configPath())
 		return nil
-	case err := <-errCh:
-		_ = server.Shutdown(context.Background())
-		return err
 	case <-time.After(5 * time.Minute):
 		_ = server.Shutdown(context.Background())
 		return errors.New("timed out waiting for browser authorization")
@@ -623,10 +700,15 @@ func browserLogin(appURL string) error {
 }
 
 func readConfig() (Config, error) {
-	path := configPath()
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(configPath())
 	if err != nil {
-		return Config{}, err
+		// Fall back to the config written by the old whagons-skills CLI so an
+		// upgrade does not force a re-login.
+		legacy, legacyErr := os.ReadFile(legacyConfigPath())
+		if legacyErr != nil {
+			return Config{}, err
+		}
+		data = legacy
 	}
 	var config Config
 	return config, json.Unmarshal(data, &config)
@@ -646,9 +728,17 @@ func writeConfig(config Config) error {
 }
 
 func configPath() string {
-	if path := os.Getenv("WHAGONS_SKILLS_CONFIG"); path != "" {
+	if path := envValue("CONFIG"); path != "" {
 		return path
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".whagons-dev-config.json"
+	}
+	return filepath.Join(home, ".whagons-dev", "config.json")
+}
+
+func legacyConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ".whagons-skills-config.json"
@@ -667,18 +757,16 @@ func wsURLWithProject(rawURL, project string) string {
 	return u.String()
 }
 
+// findSkill resolves a name or id to the full skill, including content.
+// agent.skills.get matches on either id or (case-insensitive) name, so the
+// same value is passed as both.
 func findSkill(client *Client, apiKey, nameOrID string) (Skill, error) {
-	var skills []Skill
-	if err := client.Query("agent.skills.list", map[string]any{"apiKey": apiKey}, &skills); err != nil {
-		return Skill{}, err
+	var skill Skill
+	err := client.Query("agent.skills.get", map[string]any{"apiKey": apiKey, "id": nameOrID, "name": nameOrID}, &skill)
+	if err != nil {
+		return Skill{}, fmt.Errorf("skill not found: %s (%v)", nameOrID, err)
 	}
-	needle := strings.ToLower(nameOrID)
-	for _, skill := range skills {
-		if skill.ID == nameOrID || strings.ToLower(skill.Name) == needle {
-			return skill, nil
-		}
-	}
-	return Skill{}, fmt.Errorf("skill not found: %s", nameOrID)
+	return skill, nil
 }
 
 func uploadSkill(client *Client, apiKey, path, id, name, summary string) (Skill, error) {
@@ -739,7 +827,12 @@ func installCodexSkills(client *Client, apiKey string, dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	for _, skill := range skills {
+	for _, meta := range skills {
+		// Lists are metadata-only; fetch each skill's content individually.
+		var skill Skill
+		if err := client.Query("agent.skills.get", map[string]any{"apiKey": apiKey, "id": meta.ID}, &skill); err != nil {
+			return fmt.Errorf("fetch %s: %w", meta.Name, err)
+		}
 		name := safePathName(skill.Name)
 		if name == "" {
 			name = safePathName(skill.ID)

@@ -42,6 +42,7 @@ func Schema(s *gonvex.Schema) {
 	s.TenantTable("skill_sessions", func(t *gonvex.Table) {
 		t.ID("id")
 		t.String("owner_id")
+		t.String("workspace_id")
 		t.String("token_hash")
 		t.Time("created_at")
 		t.Time("expires_at")
@@ -49,6 +50,17 @@ func Schema(s *gonvex.Schema) {
 
 		t.Index("by_token_hash", "token_hash")
 		t.Index("by_owner_token_hash", "owner_id", "token_hash")
+	})
+
+	s.TenantTable("skill_workspace_members", func(t *gonvex.Table) {
+		t.ID("id")
+		t.String("workspace_owner_id")
+		t.String("email")
+		t.String("invited_by")
+		t.Time("created_at")
+
+		t.Index("by_workspace_email", "workspace_owner_id", "email")
+		t.Index("by_email", "email")
 	})
 
 	s.TenantTable("skill_credentials", func(t *gonvex.Table) {
