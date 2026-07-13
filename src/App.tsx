@@ -1,31 +1,39 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import {
-  Button,
-  Card,
-  Chip,
-  Input,
-  ScrollShadow,
-  Tooltip,
-} from "@heroui/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  ArrowUpRight,
   Check,
   Clipboard,
   Code2,
+  Command,
   Database,
+  Fingerprint,
   KeyRound,
+  LibraryBig,
   Link2,
   LockKeyhole,
   LogOut,
   Plus,
   Search,
+  ShieldCheck,
+  Sparkles,
+  TerminalSquare,
   Trash2,
   Users,
+  Vault,
   X,
 } from "lucide-react";
 import { api } from "../gonvex/_generated/api";
 import { useMutation, useQuery } from "../gonvex/_generated/react";
+import { Avatar, AvatarFallback } from "./components/ui/avatar";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
+import { Input } from "./components/ui/input";
+import { ScrollArea } from "./components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip";
+import { getAuthErrorMessage } from "./lib/auth-error";
 
 type SkillMeta = {
   id: string;
@@ -126,7 +134,8 @@ function isInvalidSessionError(error: unknown) {
 }
 const gonvexWSURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex.whagons.com/ws";
 const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "skills";
-const googleClientID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? "";
+const googleClientID = import.meta.env.VITE_GOOGLE_CLIENT_ID
+  ?? "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com";
 
 declare global {
   interface Window {
@@ -285,6 +294,7 @@ Security rules:
 export default function App() {
   const [sessionToken, setSessionToken] = useState(readStoredSession);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [cliAuthRequest, setCliAuthRequest] = useState<CLIAuthRequest | null>(() => {
     const params = new URLSearchParams(window.location.search);
     const callback = params.get("cli_callback");
@@ -301,25 +311,26 @@ export default function App() {
   const [selectedID, setSelectedID] = useState(() => decodeURIComponent(window.location.hash.replace(/^#/, "")));
   const [notice, setNotice] = useState("");
   const [freshAPIKey, setFreshAPIKey] = useState("");
+  const [apiKeyName, setAPIKeyName] = useState("");
   const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>({ name: "", summary: "", value: "" });
   const [inviteEmail, setInviteEmail] = useState("");
 
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
-  const skills = useQuery<SkillMeta[]>(api["skills.list"], protectedArgs) ?? [];
-  const apiKeys = useQuery<APIKeyRecord[]>(api["apiKeys.list"], protectedArgs) ?? [];
-  const credentials = useQuery<CredentialMeta[]>(api["credentials.list"], protectedArgs) ?? [];
-  const me = useQuery<MeResult>(api["auth.me"], protectedArgs) ?? null;
-  const teamMembers = useQuery<TeamMember[]>(api["team.list"], protectedArgs) ?? [];
-  const login = useMutation(api["auth.login"]);
-  const logout = useMutation(api["auth.logout"]);
-  const deleteSkill = useMutation(api["skills.delete"]);
-  const createAPIKey = useMutation(api["apiKeys.create"]);
-  const revokeAPIKey = useMutation(api["apiKeys.revoke"]);
-  const getCredential = useMutation(api["credentials.get"]);
-  const saveCredential = useMutation(api["credentials.save"]);
-  const deleteCredential = useMutation(api["credentials.delete"]);
-  const inviteMember = useMutation(api["team.invite"]);
-  const removeMember = useMutation(api["team.remove"]);
+  const skills = useQuery<SkillMeta[]>(api.skills.list, protectedArgs) ?? [];
+  const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, protectedArgs) ?? [];
+  const credentials = useQuery<CredentialMeta[]>(api.credentials.list, protectedArgs) ?? [];
+  const me = useQuery<MeResult>(api.auth.me, protectedArgs) ?? null;
+  const teamMembers = useQuery<TeamMember[]>(api.team.list, protectedArgs) ?? [];
+  const login = useMutation(api.auth.login);
+  const logout = useMutation(api.auth.logout);
+  const deleteSkill = useMutation(api.skills.delete);
+  const createAPIKey = useMutation(api.apiKeys.create);
+  const revokeAPIKey = useMutation(api.apiKeys.revoke);
+  const getCredential = useMutation(api.credentials.get);
+  const saveCredential = useMutation(api.credentials.save);
+  const deleteCredential = useMutation(api.credentials.delete);
+  const inviteMember = useMutation(api.team.invite);
+  const removeMember = useMutation(api.team.remove);
   const isWorkspaceOwner = me?.is_owner ?? true;
   const cliCallbackURL = cliAuthRequest ? parseLoopbackCallback(cliAuthRequest.callback) : null;
 
@@ -333,7 +344,7 @@ export default function App() {
 
   const selectedSkill = skills.find((skill) => skill.id === selectedID) ?? filteredSkills[0] ?? skills[0] ?? null;
   const selectedSkillFull = useQuery<Skill>(
-    api["skills.get"],
+    api.skills.get,
     sessionToken && selectedSkill ? { sessionToken, id: selectedSkill.id } : "skip",
   ) ?? null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
@@ -353,6 +364,24 @@ export default function App() {
     window.addEventListener("hashchange", onHashChange);
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
+
+  useEffect(() => {
+    function onSearchShortcut(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setActiveTab("skills");
+        window.setTimeout(() => searchInputRef.current?.focus(), 0);
+      }
+    }
+    window.addEventListener("keydown", onSearchShortcut);
+    return () => window.removeEventListener("keydown", onSearchShortcut);
+  }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(() => setNotice(""), 2600);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
 
   useEffect(() => {
     if (sessionToken || !googleClientID || !googleButtonRef.current) return;
@@ -408,8 +437,9 @@ export default function App() {
       sessionStorage.setItem(sessionStorageKey, JSON.stringify(stored));
       setSessionToken(result.sessionToken);
       setAuthError("");
-    } catch {
-      setAuthError("Google login was rejected.");
+    } catch (error) {
+      console.error("[skills] Google login failed", error);
+      setAuthError(getAuthErrorMessage(error));
     }
   }
 
@@ -448,11 +478,15 @@ export default function App() {
     });
   }
 
-  async function makeAPIKey() {
+  async function makeAPIKey(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = apiKeyName.trim();
+    if (!name) return;
     await runGuarded(async () => {
-      const result = await createAPIKey({ sessionToken, name: `Agent key ${new Date().toLocaleString()}` }) as CreateAPIKeyResult;
+      const result = await createAPIKey({ sessionToken, name }) as CreateAPIKeyResult;
       setFreshAPIKey(result.apiKey);
-      setNotice("Created API key");
+      setAPIKeyName("");
+      setNotice(`Created ${result.record.name}`);
     });
   }
 
@@ -535,30 +569,89 @@ export default function App() {
   if (!sessionToken) {
     return (
       <main className="authPage">
-        <Card className="authCard">
-          <Card.Header className="authHeader">
-            <div className="authIcon">
-              <LockKeyhole size={22} />
-            </div>
+        <section className="authStory" aria-label="Whagons Skills Vault">
+          <div className="authAmbient authAmbientOne" />
+          <div className="authAmbient authAmbientTwo" />
+
+          <div className="brandSignature">
+            <div className="brandMark"><Command size={18} strokeWidth={2.4} /></div>
             <div>
-              <p className="overline">Private Whagons Library</p>
-              <Card.Title>Skills Vault</Card.Title>
-              <Card.Description>
-                {cliAuthRequest ? `Unlock to authorize ${cliAuthRequest.name}.` : "Copy, share, and manage Whagons-specific agent skills."}
-              </Card.Description>
+              <strong>Whagons</strong>
+              <span>Agent infrastructure</span>
             </div>
-          </Card.Header>
-          <Card.Content>
-            <div className="authForm">
-              {googleClientID ? (
-                <div className="googleButtonHost" ref={googleButtonRef} aria-label="Sign in with Google" />
-              ) : (
-                <div className="authError">Google login is not configured for this deployment.</div>
-              )}
-              {authError ? <div className="authError">{authError}</div> : null}
+          </div>
+
+          <div className="authStatement">
+            <Badge variant="accent"><Sparkles size={12} /> Private knowledge system</Badge>
+            <h1>Give your agents<br /><em>better instincts.</em></h1>
+            <p>One secure home for the skills, credentials, and access your team uses to get real work done.</p>
+          </div>
+
+          <div className="authArtifact" aria-hidden="true">
+            <div className="artifactRail">
+              <span>01</span>
+              <span>02</span>
+              <span>03</span>
             </div>
-          </Card.Content>
-        </Card>
+            <div className="artifactCards">
+              <div className="artifactCard artifactCardBack">
+                <span className="artifactIcon"><Database size={15} /></span>
+                <span>Project credentials</span>
+                <small>Encrypted · workspace scoped</small>
+              </div>
+              <div className="artifactCard artifactCardMiddle">
+                <span className="artifactIcon"><TerminalSquare size={15} /></span>
+                <span>whagons-monitor</span>
+                <small>Release intelligence</small>
+              </div>
+              <div className="artifactCard artifactCardFront">
+                <div className="artifactCardTop">
+                  <span className="artifactIcon"><LibraryBig size={15} /></span>
+                  <Badge variant="outline">SKILL.md</Badge>
+                </div>
+                <strong>Operational memory,<br />ready on demand.</strong>
+                <div className="artifactLines"><i /><i /><i /></div>
+              </div>
+            </div>
+          </div>
+
+          <div className="authStoryFooter">
+            <span><i className="statusDot" /> Gonvex runtime</span>
+            <span>gonvex.whagons.com</span>
+          </div>
+        </section>
+
+        <section className="authPanel">
+          <div className="authPanelInner">
+            <div className="authMobileBrand">
+              <div className="brandMark"><Command size={18} /></div>
+              <strong>Whagons</strong>
+            </div>
+            <Card className="authCard">
+              <CardHeader className="authHeader">
+                <div className="authIcon"><LockKeyhole size={21} /></div>
+                <div>
+                  <p className="eyebrow">Protected workspace</p>
+                  <CardTitle>Enter the vault</CardTitle>
+                  <CardDescription>
+                    {cliAuthRequest ? `Sign in to authorize ${cliAuthRequest.name}.` : "Continue with your approved Google account."}
+                  </CardDescription>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="authForm">
+                  <div className="googleButtonHost" ref={googleButtonRef} aria-label="Sign in with Google" />
+                  {authError ? <div className="authError">{authError}</div> : null}
+                </div>
+                <div className="authTrustRow">
+                  <ShieldCheck size={16} />
+                  <span>Workspace-scoped access<br /><small>Sessions expire automatically</small></span>
+                </div>
+              </CardContent>
+            </Card>
+            <p className="authFootnote">Internal tools · Whagons team only</p>
+          </div>
+        </section>
       </main>
     );
   }
@@ -567,47 +660,56 @@ export default function App() {
     <main className="vaultPage">
       <aside className="vaultSidebar" aria-label="Skills">
         <div className="brandBlock">
-          <div>
-            <p className="overline">Whagons</p>
-            <h1>Skills</h1>
+          <div className="brandIdentity">
+            <div className="brandMark"><Command size={18} strokeWidth={2.4} /></div>
+            <div>
+              <strong>Whagons</strong>
+              <span>Skills vault</span>
+            </div>
           </div>
-          <Chip size="sm" variant="soft">{skills.length}</Chip>
+          <Badge variant="accent">{skills.length}</Badge>
         </div>
 
         <div className="tabNav" aria-label="Vault sections">
           <button className={activeTab === "skills" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("skills")}>
-            <Code2 size={17} />
-            Skills
+            <span className="tabIcon"><LibraryBig size={17} /></span>
+            <span>Skills</span>
+            <small>{skills.length.toString().padStart(2, "0")}</small>
           </button>
           <button className={activeTab === "apiKeys" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("apiKeys")}>
-            <KeyRound size={17} />
-            API keys
+            <span className="tabIcon"><Fingerprint size={17} /></span>
+            <span>API keys</span>
+            <small>{activeAPIKeys.length.toString().padStart(2, "0")}</small>
           </button>
           <button className={activeTab === "credentials" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("credentials")}>
-            <Database size={17} />
-            Credentials
+            <span className="tabIcon"><Vault size={17} /></span>
+            <span>Credentials</span>
+            <small>{credentials.length.toString().padStart(2, "0")}</small>
           </button>
           <button className={activeTab === "team" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("team")}>
-            <Users size={17} />
-            Team
+            <span className="tabIcon"><Users size={17} /></span>
+            <span>Team</span>
+            <small>{teamMembers.length.toString().padStart(2, "0")}</small>
           </button>
         </div>
 
         {activeTab === "skills" ? (
-          <>
+          <div className="skillLibrary">
             <div className="sidebarTools">
+              <p className="sidebarLabel">Library</p>
               <div className="searchBox">
                 <Search size={16} />
                 <Input
-                  fullWidth
+                  ref={searchInputRef}
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search skills"
+                  placeholder="Find a skill..."
                   aria-label="Search skills"
                 />
+                <kbd>⌘ K</kbd>
               </div>
             </div>
-            <ScrollShadow className="skillScroll" hideScrollBar>
+            <ScrollArea className="skillScroll">
               {filteredSkills.length === 0 ? (
                 <div className="emptyState">
                   <Code2 size={28} />
@@ -624,14 +726,21 @@ export default function App() {
                     window.history.replaceState(null, "", `#${encodeURIComponent(skill.id)}`);
                   }}
                 >
-                  <span className="skillRowTitle">{skill.name}</span>
-                  <span className="skillRowMeta">{skill.summary || `Updated ${formatDate(skill.updated_at)}`}</span>
+                  <span className="skillRowIndex">{String(filteredSkills.indexOf(skill) + 1).padStart(2, "0")}</span>
+                  <span className="skillRowCopy">
+                    <span className="skillRowTitle">{skill.name}</span>
+                    <span className="skillRowMeta">{skill.summary || `Updated ${formatDate(skill.updated_at)}`}</span>
+                  </span>
+                  <ArrowUpRight className="skillRowArrow" size={15} />
                 </button>
               ))}
-            </ScrollShadow>
-          </>
+            </ScrollArea>
+          </div>
         ) : (
           <div className="sidebarHint">
+            <div className="sidebarHintIcon">
+              {activeTab === "apiKeys" ? <Fingerprint size={20} /> : activeTab === "credentials" ? <Vault size={20} /> : <Users size={20} />}
+            </div>
             <strong>
               {activeTab === "apiKeys" ? `${activeAPIKeys.length} active keys`
                 : activeTab === "credentials" ? `${credentials.length} credentials`
@@ -646,27 +755,36 @@ export default function App() {
         )}
 
         <div className="sidebarAccount">
+          <Avatar>
+            <AvatarFallback>{(me?.name || me?.email || "W").slice(0, 2).toUpperCase()}</AvatarFallback>
+          </Avatar>
           <div className="sidebarAccountInfo">
-            <strong>{me?.name || me?.email || "Signed in"}</strong>
-            {me && !me.is_owner ? <span>Workspace of {me.workspace_email || "the owner"}</span> : <span>{me?.email ?? ""}</span>}
+            <strong>{me?.name || me?.email || "Whagons member"}</strong>
+            {me && !me.is_owner ? <span>{me.workspace_email || "Shared workspace"}</span> : <span>{me?.email ?? "Owner workspace"}</span>}
           </div>
           <Tooltip>
-            <Tooltip.Trigger>
-              <Button type="button" aria-label="Sign out" onPress={() => void signOut()}>
+            <TooltipTrigger asChild>
+              <Button type="button" variant="ghost" size="icon" aria-label="Sign out" onClick={() => void signOut()}>
                 <LogOut size={16} />
               </Button>
-            </Tooltip.Trigger>
-            <Tooltip.Content>Sign out</Tooltip.Content>
+            </TooltipTrigger>
+            <TooltipContent>Sign out</TooltipContent>
           </Tooltip>
         </div>
       </aside>
 
       <section className="vaultMain">
+        <div className="workspaceBar">
+          <span className="workspaceName"><ShieldCheck size={14} /> Private workspace</span>
+          <span className="runtimeStatus"><i className="statusDot" /> Gonvex live</span>
+        </div>
+
         {cliAuthRequest ? (
           <div className="cliAuthBanner">
-            <div>
-              <p className="overline">CLI authorization</p>
-              <h3>{cliAuthRequest.name}</h3>
+            <div className="cliAuthIcon"><TerminalSquare size={21} /></div>
+            <div className="cliAuthCopy">
+              <p className="eyebrow">CLI authorization request</p>
+              <h3>Connect {cliAuthRequest.name}</h3>
               {cliCallbackURL ? (
                 <p>Create a workspace API key and send it to <code>{cliCallbackURL.origin}</code> on this machine.</p>
               ) : (
@@ -675,15 +793,17 @@ export default function App() {
             </div>
             <div className="primaryActions">
               {cliCallbackURL ? (
-                <Button type="button" variant="primary" onPress={() => void authorizeCLI()}>
+                <Button type="button" variant="accent" onClick={() => void authorizeCLI()}>
                   <KeyRound size={16} />
                   Authorize CLI
                 </Button>
               ) : null}
               <Button
                 type="button"
+                variant="ghost"
+                size="icon"
                 aria-label="Dismiss CLI authorization"
-                onPress={() => {
+                onClick={() => {
                   setCliAuthRequest(null);
                   window.history.replaceState(null, "", window.location.pathname + window.location.hash);
                 }}
@@ -696,68 +816,77 @@ export default function App() {
         {activeTab === "skills" && selectedSkill ? (
           <>
             <header className="mainHeader">
-              <div>
-                <p className="overline">Selected skill</p>
+              <div className="headerCopy">
+                <p className="eyebrow"><span>Skill dossier</span> / {selectedSkill.id.slice(0, 8)}</p>
                 <h2>{selectedSkill.name}</h2>
-                <p className="summaryLine">{selectedSkill.summary}</p>
+                <p className="summaryLine">{selectedSkill.summary || "A team instruction set ready for agents to use."}</p>
               </div>
               <div className="primaryActions">
                 <Tooltip>
-                  <Tooltip.Trigger>
+                  <TooltipTrigger asChild>
                     <Button
                       type="button"
+                      variant="outline"
                       aria-label="Copy skill"
-                      isDisabled={selectedContent === null}
-                      onPress={() => selectedContent !== null && void copyText(selectedContent, "Copied skill")}
+                      disabled={selectedContent === null}
+                      onClick={() => selectedContent !== null && void copyText(selectedContent, "Copied skill")}
                     >
-                      <Clipboard size={18} />
+                      <Clipboard size={16} />
                       Copy
                     </Button>
-                  </Tooltip.Trigger>
-                  <Tooltip.Content>Copy skill</Tooltip.Content>
+                  </TooltipTrigger>
+                  <TooltipContent>Copy the full SKILL.md</TooltipContent>
                 </Tooltip>
                 <Tooltip>
-                  <Tooltip.Trigger>
+                  <TooltipTrigger asChild>
                     <Button
                       type="button"
+                      variant="outline"
                       aria-label="Copy share link"
-                      onPress={() => void copyText(shareURL(selectedSkill), "Copied share link")}
+                      onClick={() => void copyText(shareURL(selectedSkill), "Copied share link")}
                     >
-                      <Link2 size={18} />
-                      Share link
+                      <Link2 size={16} />
+                      Share
                     </Button>
-                  </Tooltip.Trigger>
-                  <Tooltip.Content>Copy share link</Tooltip.Content>
+                  </TooltipTrigger>
+                  <TooltipContent>Copy a deep link</TooltipContent>
                 </Tooltip>
                 <Tooltip>
-                  <Tooltip.Trigger>
+                  <TooltipTrigger asChild>
                     <Button
                       type="button"
+                      variant="ghost"
+                      size="icon"
                       aria-label="Delete skill"
                       className="dangerButton"
-                      onPress={() => void removeSkill(selectedSkill)}
+                      onClick={() => void removeSkill(selectedSkill)}
                     >
-                      <Trash2 size={18} />
-                      Delete
+                      <Trash2 size={16} />
                     </Button>
-                  </Tooltip.Trigger>
-                  <Tooltip.Content>Delete skill</Tooltip.Content>
+                  </TooltipTrigger>
+                  <TooltipContent>Delete skill</TooltipContent>
                 </Tooltip>
               </div>
             </header>
 
             <div className="libraryLayout">
               <section className="readerPane">
-                <div className="metaStrip">
-                  {selectedContent !== null ? (
-                    <>
-                      <span>{selectedContent.length.toLocaleString()} chars</span>
-                      <span>{countWords(selectedContent).toLocaleString()} words</span>
-                    </>
-                  ) : (
-                    <span>Loading…</span>
-                  )}
-                  <span>Updated {formatDate(selectedSkill.updated_at)}</span>
+                <div className="readerTopline">
+                  <div className="documentIdentity">
+                    <span className="documentIcon"><Code2 size={17} /></span>
+                    <div><strong>SKILL.md</strong><small>Rendered document</small></div>
+                  </div>
+                  <div className="metaStrip">
+                    {selectedContent !== null ? (
+                      <>
+                        <Badge variant="muted">{countWords(selectedContent).toLocaleString()} words</Badge>
+                        <Badge variant="muted">{selectedContent.length.toLocaleString()} chars</Badge>
+                      </>
+                    ) : (
+                      <Badge variant="muted">Loading…</Badge>
+                    )}
+                    <Badge variant="outline">Updated {formatDate(selectedSkill.updated_at)}</Badge>
+                  </div>
                 </div>
                 <article className="markdownDoc">
                   {selectedContent !== null ? (
@@ -771,39 +900,58 @@ export default function App() {
           </>
         ) : activeTab === "skills" ? (
           <div className="emptyMain">
-            <Code2 size={32} />
-            <h2>No skills yet</h2>
+            <div className="emptyIcon"><LibraryBig size={26} /></div>
+            <p className="eyebrow">Empty library</p>
+            <h2>Your first skill belongs here.</h2>
             <p>Create an API key and let agents upload skills into the vault.</p>
+            <Button variant="accent" onClick={() => setActiveTab("apiKeys")}><KeyRound size={16} /> Create API key</Button>
           </div>
         ) : null}
 
         {activeTab === "apiKeys" ? (
           <>
             <header className="mainHeader">
-              <div>
-                <p className="overline">Agent access</p>
+              <div className="headerCopy">
+                <p className="eyebrow"><span>Access control</span> / Agents</p>
                 <h2>API keys</h2>
                 <p className="summaryLine">Create keys for the CLI and agents. New key values are shown once.</p>
               </div>
               <div className="primaryActions">
-                <Button type="button" onPress={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent setup")}>
+                <Button type="button" variant="outline" onClick={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent setup")}>
                   <Clipboard size={16} />
-                  Copy agent setup
-                </Button>
-                <Button type="button" variant="primary" onPress={() => void makeAPIKey()}>
-                  <KeyRound size={16} />
-                  Create API key
+                  Copy setup
                 </Button>
               </div>
             </header>
             <div className="settingsLayout">
               <Card className="settingsCard">
-                <Card.Content className="apiContent">
+                <CardHeader>
+                  <div className="settingsIcon"><Fingerprint size={19} /></div>
+                  <div><CardTitle>Active keys</CardTitle><CardDescription>Keys with live access to this workspace.</CardDescription></div>
+                </CardHeader>
+                <CardContent className="apiContent">
+                  <form className="apiKeyCreateForm" onSubmit={(event) => void makeAPIKey(event)}>
+                    <label>
+                      <span>Name this key</span>
+                      <Input
+                        value={apiKeyName}
+                        onChange={(event) => setAPIKeyName(event.target.value)}
+                        placeholder="e.g. Gabriel's laptop"
+                        maxLength={80}
+                        autoComplete="off"
+                        required
+                      />
+                    </label>
+                    <Button type="submit" variant="accent">
+                      <KeyRound size={16} />
+                      Create key
+                    </Button>
+                  </form>
                   {freshAPIKey ? (
                     <div className="freshKey">
-                      <span>New key</span>
+                      <div><Badge variant="accent">New key</Badge><span>Copy it now — it won&apos;t be shown again.</span></div>
                       <code>{freshAPIKey}</code>
-                      <Button type="button" onPress={() => void copyText(freshAPIKey, "Copied API key")}>
+                      <Button type="button" onClick={() => void copyText(freshAPIKey, "Copied API key")}>
                         <Clipboard size={16} />
                         Copy key
                       </Button>
@@ -820,33 +968,35 @@ export default function App() {
                         </div>
                         <Button
                           type="button"
+                          variant="ghost"
                           className="dangerButton"
-                          onPress={() => void revokeAPIKey({ sessionToken, id: key.id })}
+                          onClick={() => void runGuarded(async () => {
+                            await revokeAPIKey({ sessionToken, id: key.id });
+                            setNotice("Revoked API key");
+                          })}
                         >
                           Revoke
                         </Button>
                       </div>
                     ))}
                   </div>
-                </Card.Content>
+                </CardContent>
               </Card>
 
-              <Card className="settingsCard">
-                <Card.Content className="apiContent">
-                  <div className="apiCodeHeader">
-                    <div>
-                      <p className="overline">Agent snippet</p>
-                      <h3>Skills Vault handoff</h3>
-                    </div>
-                    <Button type="button" onPress={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent handoff")}>
-                      <Clipboard size={16} />
-                      Copy
-                    </Button>
-                  </div>
+              <Card className="settingsCard codeCard">
+                <CardHeader>
+                  <div className="settingsIcon"><TerminalSquare size={19} /></div>
+                  <div><CardTitle>Agent handoff</CardTitle><CardDescription>A complete bootstrap prompt for Codex or another agent.</CardDescription></div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent handoff")}>
+                    <Clipboard size={16} />
+                    Copy
+                  </Button>
+                </CardHeader>
+                <CardContent className="apiContent">
                   <div className="apiCode">
                     <pre>{agentSetupInstructions(freshAPIKey)}</pre>
                   </div>
-                </Card.Content>
+                </CardContent>
               </Card>
             </div>
           </>
@@ -855,47 +1005,37 @@ export default function App() {
         {activeTab === "credentials" ? (
           <>
             <header className="mainHeader">
-              <div>
-                <p className="overline">Project secrets</p>
+              <div className="headerCopy">
+                <p className="eyebrow"><span>Secure storage</span> / Secrets</p>
                 <h2>Credentials</h2>
                 <p className="summaryLine">Store credentials for the CLI and agents. Values are never shown in this list.</p>
               </div>
             </header>
-            <div className="settingsLayout">
+            <div className="settingsLayout settingsColumns">
               <Card className="settingsCard">
-                <Card.Content className="apiContent">
+                <CardHeader>
+                  <div className="settingsIcon"><Plus size={19} /></div>
+                  <div><CardTitle>Store a credential</CardTitle><CardDescription>Save or replace a workspace secret.</CardDescription></div>
+                </CardHeader>
+                <CardContent className="apiContent">
                   <form className="credentialForm" onSubmit={(event) => void storeCredential(event)}>
-                    <Input
-                      fullWidth
-                      value={credentialDraft.name}
-                      onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))}
-                      placeholder="Credential name, e.g. coolify-whagons"
-                      required
-                    />
-                    <Input
-                      fullWidth
-                      value={credentialDraft.summary}
-                      onChange={(event) => setCredentialDraft((current) => ({ ...current, summary: event.target.value }))}
-                      placeholder="Description"
-                    />
-                    <Input
-                      fullWidth
-                      value={credentialDraft.value}
-                      onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))}
-                      placeholder="Secret value"
-                      type="password"
-                      required
-                    />
-                    <Button type="submit" variant="primary">
+                    <label><span>Name</span><Input value={credentialDraft.name} onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))} placeholder="coolify-whagons" required /></label>
+                    <label><span>Description</span><Input value={credentialDraft.summary} onChange={(event) => setCredentialDraft((current) => ({ ...current, summary: event.target.value }))} placeholder="What this credential unlocks" /></label>
+                    <label><span>Secret value</span><Input value={credentialDraft.value} onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Paste the secret value" type="password" required /></label>
+                    <Button type="submit" variant="accent">
                       <Plus size={16} />
                       Store credential
                     </Button>
                   </form>
-                </Card.Content>
+                </CardContent>
               </Card>
 
               <Card className="settingsCard">
-                <Card.Content className="apiContent">
+                <CardHeader>
+                  <div className="settingsIcon"><Vault size={19} /></div>
+                  <div><CardTitle>Credential vault</CardTitle><CardDescription>{credentials.length} encrypted workspace entries.</CardDescription></div>
+                </CardHeader>
+                <CardContent className="apiContent">
                   <div className="keyList">
                     {credentials.length === 0 ? (
                       <span className="mutedText">No project credentials stored.</span>
@@ -906,22 +1046,28 @@ export default function App() {
                           <span>{credential.summary || `Updated ${formatDate(credential.updated_at)}`}</span>
                         </div>
                         <div className="rowActions">
-                          <Button type="button" onPress={() => void copyCredential(credential)}>
+                          <Button type="button" variant="outline" size="sm" onClick={() => void copyCredential(credential)}>
                             <Clipboard size={16} />
                             Copy
                           </Button>
                           <Button
                             type="button"
+                            variant="ghost"
+                            size="icon"
                             className="dangerButton"
-                            onPress={() => void deleteCredential({ sessionToken, id: credential.id })}
+                            aria-label={`Delete ${credential.name}`}
+                            onClick={() => void runGuarded(async () => {
+                              await deleteCredential({ sessionToken, id: credential.id });
+                              setNotice(`Deleted ${credential.name}`);
+                            })}
                           >
-                            Delete
+                            <Trash2 size={16} />
                           </Button>
                         </div>
                       </div>
                     ))}
                   </div>
-                </Card.Content>
+                </CardContent>
               </Card>
             </div>
           </>
@@ -930,8 +1076,8 @@ export default function App() {
         {activeTab === "team" ? (
           <>
             <header className="mainHeader">
-              <div>
-                <p className="overline">Workspace access</p>
+              <div className="headerCopy">
+                <p className="eyebrow"><span>Workspace</span> / People</p>
                 <h2>Team</h2>
                 <p className="summaryLine">
                   {isWorkspaceOwner
@@ -940,20 +1086,17 @@ export default function App() {
                 </p>
               </div>
             </header>
-            <div className="settingsLayout">
+            <div className="settingsLayout settingsColumns">
               {isWorkspaceOwner ? (
                 <Card className="settingsCard">
-                  <Card.Content className="apiContent">
+                  <CardHeader>
+                    <div className="settingsIcon"><Plus size={19} /></div>
+                    <div><CardTitle>Invite a teammate</CardTitle><CardDescription>Grant full workspace access by Google email.</CardDescription></div>
+                  </CardHeader>
+                  <CardContent className="apiContent">
                     <form className="credentialForm" onSubmit={(event) => void submitInvite(event)}>
-                      <Input
-                        fullWidth
-                        value={inviteEmail}
-                        onChange={(event) => setInviteEmail(event.target.value)}
-                        placeholder="teammate@whagons.com"
-                        type="email"
-                        required
-                      />
-                      <Button type="submit" variant="primary">
+                      <label><span>Email address</span><Input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="teammate@whagons.com" type="email" required /></label>
+                      <Button type="submit" variant="accent">
                         <Plus size={16} />
                         Invite member
                       </Button>
@@ -961,12 +1104,16 @@ export default function App() {
                     <span className="mutedText">
                       Invited members get full access to this workspace: skills, credentials, and API keys. Removing a member also revokes their active sessions.
                     </span>
-                  </Card.Content>
+                  </CardContent>
                 </Card>
               ) : null}
 
               <Card className="settingsCard">
-                <Card.Content className="apiContent">
+                <CardHeader>
+                  <div className="settingsIcon"><Users size={19} /></div>
+                  <div><CardTitle>Workspace members</CardTitle><CardDescription>{teamMembers.length} invited collaborators.</CardDescription></div>
+                </CardHeader>
+                <CardContent className="apiContent">
                   <div className="keyList">
                     {teamMembers.length === 0 ? (
                       <span className="mutedText">No invited members yet. This workspace is only accessible to its owner.</span>
@@ -979,8 +1126,9 @@ export default function App() {
                         {isWorkspaceOwner ? (
                           <Button
                             type="button"
+                            variant="ghost"
                             className="dangerButton"
-                            onPress={() => void dropMember(member)}
+                            onClick={() => void dropMember(member)}
                           >
                             Remove
                           </Button>
@@ -988,7 +1136,7 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                </Card.Content>
+                </CardContent>
               </Card>
             </div>
           </>
