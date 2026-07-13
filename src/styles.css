@@ -34,9 +34,10 @@ body,
 
 body {
   min-width: 320px;
-  height: 100vh;
+  min-height: 100vh;
   margin: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: var(--paper);
 }
 
@@ -752,12 +753,15 @@ button {
 .vaultPage {
   display: grid;
   grid-template-columns: 310px minmax(0, 1fr);
-  height: 100dvh;
-  overflow: hidden;
+  min-height: 100vh;
+  align-items: start;
+  overflow: visible;
   background: var(--paper);
 }
 
 .vaultSidebar {
+  position: sticky;
+  top: 0;
   display: flex;
   height: 100dvh;
   min-height: 0;
@@ -1118,10 +1122,9 @@ button {
   position: relative;
   display: flex;
   min-width: 0;
-  min-height: 0;
-  height: 100dvh;
+  min-height: 100vh;
   flex-direction: column;
-  overflow: hidden;
+  overflow: visible;
   background:
     linear-gradient(rgba(42, 43, 38, 0.023) 1px, transparent 1px),
     linear-gradient(90deg, rgba(42, 43, 38, 0.023) 1px, transparent 1px),
@@ -1130,6 +1133,9 @@ button {
 }
 
 .workspaceBar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   min-height: 43px;
   flex: 0 0 auto;
@@ -1270,28 +1276,15 @@ button {
 
 .libraryLayout,
 .settingsLayout {
-  height: 0;
-  min-height: 0;
-  flex: 1 1 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  min-height: auto;
+  flex: 0 0 auto;
+  overflow: visible;
   padding: 24px 32px 38px;
-  scrollbar-gutter: stable;
 }
 
-.libraryLayout::-webkit-scrollbar,
-.settingsLayout::-webkit-scrollbar,
 .skillScroll::-webkit-scrollbar,
 .sidebarHint::-webkit-scrollbar {
   width: 10px;
-}
-
-.libraryLayout::-webkit-scrollbar-thumb,
-.settingsLayout::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: #b8b6ae;
-  background-clip: padding-box;
 }
 
 .skillScroll::-webkit-scrollbar-thumb,
@@ -1893,12 +1886,6 @@ html[data-theme="dark"] .freshKey code {
   color: #d7ef98;
 }
 
-html[data-theme="dark"] .libraryLayout::-webkit-scrollbar-thumb,
-html[data-theme="dark"] .settingsLayout::-webkit-scrollbar-thumb {
-  background: #51544a;
-  background-clip: padding-box;
-}
-
 @keyframes cardArrive {
   from { opacity: 0; transform: translateY(14px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -1982,6 +1969,7 @@ html[data-theme="dark"] .settingsLayout::-webkit-scrollbar-thumb {
   }
 
   .vaultSidebar {
+    position: static;
     display: grid;
     height: auto;
     min-height: auto;
