@@ -14,10 +14,12 @@ import {
   Link2,
   LockKeyhole,
   LogOut,
+  Moon,
   Plus,
   Search,
   ShieldCheck,
   Sparkles,
+  Sun,
   TerminalSquare,
   Trash2,
   Users,
@@ -31,7 +33,6 @@ import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card";
 import { Input } from "./components/ui/input";
-import { ScrollArea } from "./components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip";
 import { getAuthErrorMessage } from "./lib/auth-error";
 
@@ -103,8 +104,10 @@ type TeamMember = {
 };
 
 type VaultTab = "skills" | "apiKeys" | "credentials" | "team";
+type ColorTheme = "light" | "dark";
 
 const sessionStorageKey = "whagons-skills-vault-session";
+const themeStorageKey = "whagons-skills-vault-theme";
 
 type StoredSession = {
   sessionToken: string;
@@ -127,6 +130,15 @@ function readStoredSession(): string {
     // Pre-expiry format: the raw token string.
   }
   return raw;
+}
+
+function readPreferredTheme(): ColorTheme {
+  const stored = localStorage.getItem(themeStorageKey);
+  const theme = stored === "light" || stored === "dark"
+    ? stored
+    : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = theme;
+  return theme;
 }
 
 function isInvalidSessionError(error: unknown) {
@@ -293,6 +305,7 @@ Security rules:
 
 export default function App() {
   const [sessionToken, setSessionToken] = useState(readStoredSession);
+  const [theme, setTheme] = useState<ColorTheme>(readPreferredTheme);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [cliAuthRequest, setCliAuthRequest] = useState<CLIAuthRequest | null>(() => {
@@ -349,6 +362,11 @@ export default function App() {
   ) ?? null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
   const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(themeStorageKey, theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!selectedSkill) return;
@@ -622,6 +640,16 @@ export default function App() {
         </section>
 
         <section className="authPanel">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="themeToggle authThemeToggle"
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          </Button>
           <div className="authPanelInner">
             <div className="authMobileBrand">
               <div className="brandMark"><Command size={18} /></div>
@@ -709,7 +737,7 @@ export default function App() {
                 <kbd>⌘ K</kbd>
               </div>
             </div>
-            <ScrollArea className="skillScroll">
+            <div className="skillScroll" tabIndex={0} aria-label="Skill library">
               {filteredSkills.length === 0 ? (
                 <div className="emptyState">
                   <Code2 size={28} />
@@ -734,7 +762,7 @@ export default function App() {
                   <ArrowUpRight className="skillRowArrow" size={15} />
                 </button>
               ))}
-            </ScrollArea>
+            </div>
           </div>
         ) : (
           <div className="sidebarHint">
@@ -776,7 +804,24 @@ export default function App() {
       <section className="vaultMain">
         <div className="workspaceBar">
           <span className="workspaceName"><ShieldCheck size={14} /> Private workspace</span>
-          <span className="runtimeStatus"><i className="statusDot" /> Gonvex live</span>
+          <div className="workspaceControls">
+            <span className="runtimeStatus"><i className="statusDot" /> Gonvex live</span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="themeToggle"
+                  aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+                  onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+                >
+                  {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Switch to {theme === "dark" ? "light" : "dark"} mode</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
 
         {cliAuthRequest ? (

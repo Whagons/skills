@@ -752,15 +752,16 @@ button {
 .vaultPage {
   display: grid;
   grid-template-columns: 310px minmax(0, 1fr);
-  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   background: var(--paper);
 }
 
 .vaultSidebar {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  height: 100dvh;
   min-height: 0;
+  flex-direction: column;
   overflow: hidden;
   border-right: 1px solid rgba(255, 255, 255, 0.07);
   background:
@@ -773,6 +774,7 @@ button {
 .brandBlock {
   display: flex;
   min-height: 82px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -785,6 +787,7 @@ button {
 
 .tabNav {
   display: grid;
+  flex: 0 0 auto;
   gap: 3px;
   border-top: 1px solid var(--line-dark);
   border-bottom: 1px solid var(--line-dark);
@@ -846,14 +849,16 @@ button {
 }
 
 .skillLibrary {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
   padding-top: 15px;
 }
 
 .sidebarTools {
+  flex: 0 0 auto;
   padding: 0 13px 12px;
 }
 
@@ -902,17 +907,20 @@ button {
 }
 
 .skillScroll {
-  height: 100%;
+  height: 0;
+  flex: 1 1 0;
   min-height: 0;
-  overflow: hidden;
-}
-
-.skillScroll .ui-scroll-area-viewport {
-  overflow-y: auto !important;
+  overflow-x: hidden;
+  overflow-y: scroll;
   overscroll-behavior: contain;
   padding: 0 10px 18px;
+  outline: none;
   scrollbar-gutter: stable;
   touch-action: pan-y;
+}
+
+.skillScroll:focus-visible {
+  box-shadow: 0 0 0 2px rgba(215, 255, 98, 0.24) inset;
 }
 
 .skillRow {
@@ -1033,8 +1041,11 @@ button {
 
 .sidebarHint {
   display: grid;
+  flex: 1 1 0;
+  min-height: 0;
   align-content: start;
   gap: 8px;
+  overflow-y: auto;
   color: #7d8076;
   padding: 24px 20px;
 }
@@ -1065,6 +1076,7 @@ button {
   align-items: center;
   gap: 10px;
   min-height: 68px;
+  flex: 0 0 auto;
   border-top: 1px solid var(--line-dark);
   padding: 13px 14px;
 }
@@ -1107,6 +1119,7 @@ button {
   display: flex;
   min-width: 0;
   min-height: 0;
+  height: 100dvh;
   flex-direction: column;
   overflow: hidden;
   background:
@@ -1142,6 +1155,27 @@ button {
 
 .runtimeStatus {
   color: #74766c;
+}
+
+.workspaceControls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.themeToggle.ui-button {
+  width: 31px;
+  height: 31px;
+  min-height: 31px;
+  border-radius: 8px;
+  color: #666960;
+}
+
+.authThemeToggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 2;
 }
 
 .mainHeader {
@@ -1243,6 +1277,29 @@ button {
   overscroll-behavior: contain;
   padding: 24px 32px 38px;
   scrollbar-gutter: stable;
+}
+
+.libraryLayout::-webkit-scrollbar,
+.settingsLayout::-webkit-scrollbar,
+.skillScroll::-webkit-scrollbar,
+.sidebarHint::-webkit-scrollbar {
+  width: 10px;
+}
+
+.libraryLayout::-webkit-scrollbar-thumb,
+.settingsLayout::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #b8b6ae;
+  background-clip: padding-box;
+}
+
+.skillScroll::-webkit-scrollbar-thumb,
+.sidebarHint::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #4c4f47;
+  background-clip: padding-box;
 }
 
 .libraryLayout {
@@ -1663,6 +1720,185 @@ button {
   color: var(--acid);
 }
 
+/* Dark mode keeps the vault's archival, acid-accent character without flattening it. */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  color: #e9ebe2;
+  background: #12130f;
+  --ink: #eef0e7;
+  --ink-soft: #d5d8cd;
+  --paper: #141510;
+  --paper-raised: #1b1c17;
+  --line: #34362e;
+  --muted: #999c91;
+}
+
+html[data-theme="dark"] body {
+  background: var(--paper);
+}
+
+html[data-theme="dark"] .authPanel {
+  background:
+    radial-gradient(circle at 85% 15%, rgba(215, 255, 98, 0.09), transparent 26%),
+    #12130f;
+}
+
+html[data-theme="dark"] .ui-card,
+html[data-theme="dark"] .authCard {
+  border-color: #36382f;
+  background: #1b1c17;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.035) inset, 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme="dark"] .ui-card-description,
+html[data-theme="dark"] .summaryLine,
+html[data-theme="dark"] .mutedText,
+html[data-theme="dark"] .documentIdentity small,
+html[data-theme="dark"] .authFootnote {
+  color: #92958a;
+}
+
+html[data-theme="dark"] .ui-input {
+  border-color: #3a3c33;
+  background: #151610;
+  color: #eceee5;
+}
+
+html[data-theme="dark"] .ui-input:hover {
+  border-color: #505348;
+}
+
+html[data-theme="dark"] .ui-input:focus {
+  border-color: #9fbd48;
+  background: #181a13;
+}
+
+html[data-theme="dark"] .ui-button--outline {
+  border-color: #3b3d34;
+  background: rgba(31, 33, 27, 0.82);
+  color: #d4d7cc;
+}
+
+html[data-theme="dark"] .ui-button--outline:hover:not(:disabled),
+html[data-theme="dark"] .ui-button--ghost:hover:not(:disabled) {
+  background: #292b24;
+  color: #f2f4eb;
+}
+
+html[data-theme="dark"] .ui-badge--outline,
+html[data-theme="dark"] .ui-badge--muted {
+  border-color: #3a3c33;
+  background: #25271f;
+  color: #aeb1a5;
+}
+
+html[data-theme="dark"] .authTrustRow,
+html[data-theme="dark"] .settingsCard .ui-card-header {
+  border-color: #34362e;
+}
+
+html[data-theme="dark"] .vaultMain {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    var(--paper);
+  background-size: 32px 32px, 32px 32px, auto;
+}
+
+html[data-theme="dark"] .workspaceBar {
+  border-color: #303229;
+  background: rgba(20, 21, 16, 0.9);
+  color: #8f9287;
+}
+
+html[data-theme="dark"] .runtimeStatus,
+html[data-theme="dark"] .themeToggle.ui-button {
+  color: #9a9d91;
+}
+
+html[data-theme="dark"] .mainHeader {
+  border-color: #34362e;
+  background: rgba(24, 25, 20, 0.82);
+}
+
+html[data-theme="dark"] .readerPane,
+html[data-theme="dark"] .settingsCard {
+  border-color: #36382f;
+  background: #1b1c17;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.22);
+}
+
+html[data-theme="dark"] .readerTopline {
+  border-color: #34362e;
+  background: #20211b;
+}
+
+html[data-theme="dark"] .documentIcon,
+html[data-theme="dark"] .settingsIcon,
+html[data-theme="dark"] .emptyIcon {
+  border-color: #3a3c33;
+  background: #282a22;
+  color: #b3b6aa;
+}
+
+html[data-theme="dark"] .markdownDoc {
+  color: #c2c5ba;
+}
+
+html[data-theme="dark"] .markdownDoc h2 {
+  border-color: #34362e;
+}
+
+html[data-theme="dark"] .markdownDoc code {
+  border-color: #3a3c33;
+  background: #272920;
+  color: #d7eb9d;
+}
+
+html[data-theme="dark"] .markdownDoc blockquote {
+  background: #252b18;
+  color: #b9c895;
+}
+
+html[data-theme="dark"] .markdownDoc th,
+html[data-theme="dark"] .markdownDoc td {
+  border-color: #3b3d34;
+}
+
+html[data-theme="dark"] .apiKeyCreateForm,
+html[data-theme="dark"] .keyRow {
+  border-color: #383a31;
+  background: #20211b;
+}
+
+html[data-theme="dark"] .apiKeyCreateForm .ui-input {
+  background: #171812;
+}
+
+html[data-theme="dark"] .keyRow:hover {
+  border-color: #4b4e42;
+  background: #25271f;
+}
+
+html[data-theme="dark"] .keyRow strong {
+  color: #e5e7de;
+}
+
+html[data-theme="dark"] .freshKey {
+  border-color: #64752d;
+  background: #252e15;
+}
+
+html[data-theme="dark"] .freshKey code {
+  color: #d7ef98;
+}
+
+html[data-theme="dark"] .libraryLayout::-webkit-scrollbar-thumb,
+html[data-theme="dark"] .settingsLayout::-webkit-scrollbar-thumb {
+  background: #51544a;
+  background-clip: padding-box;
+}
+
 @keyframes cardArrive {
   from { opacity: 0; transform: translateY(14px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -1747,6 +1983,7 @@ button {
 
   .vaultSidebar {
     display: grid;
+    height: auto;
     min-height: auto;
     grid-template-rows: auto auto auto auto;
     overflow: visible;
@@ -1785,6 +2022,7 @@ button {
   }
 
   .vaultMain {
+    height: auto;
     min-height: 650px;
     overflow: visible;
   }
