@@ -40,6 +40,7 @@ test("production nginx sends baseline browser security headers", async () => {
   const nginx = await source("nginx.conf");
   assert.match(nginx, /Content-Security-Policy/i);
   assert.match(nginx, /frame-ancestors 'none'/i);
+  assert.match(nginx, /Strict-Transport-Security[^\n]*max-age=31536000/i);
   assert.match(nginx, /Referrer-Policy[^\n]*no-referrer/i);
   assert.match(nginx, /X-Content-Type-Options[^\n]*nosniff/i);
 });
