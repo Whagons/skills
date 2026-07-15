@@ -12,23 +12,59 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gonvex/gonvex/pkg/gonvex"
 )
 
-const sessionTTL = 30 * 24 * time.Hour
-const defaultGoogleClientID = "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com"
-const defaultAllowedEmail = "malek.gabriel33@gmail.com"
+const (
+	sessionTTL              = 30 * 24 * time.Hour
+	defaultAPIKeyTTL        = 30 * 24 * time.Hour
+	maxAPIKeyTTL            = 90 * 24 * time.Hour
+	maxSkillContentBytes    = 2 << 20
+	maxCredentialValueSize  = 256 << 10
+	maxNameLength           = 120
+	maxSummaryLength        = 1000
+	maxWorkspaceSkills      = 500
+	maxWorkspaceKeys        = 50
+	maxWorkspaceCredentials = 100
+	maxWorkspaceMembers     = 50
+	defaultGoogleClientID   = "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com"
+	defaultAllowedEmail     = "malek.gabriel33@gmail.com"
+)
+
+const (
+	scopeSkillsRead       = "skills:read"
+	scopeSkillsWrite      = "skills:write"
+	scopeCredentialsRead  = "credentials:read"
+	scopeCredentialsWrite = "credentials:write"
+	scopeKeysRead         = "keys:read"
+	scopeKeysRevoke       = "keys:revoke"
+)
 
 type SessionArgs struct {
 	SessionToken string `json:"sessionToken"`
+}
+
+type SwitchWorkspaceArgs struct {
+	SessionToken string `json:"sessionToken"`
+	WorkspaceID  string `json:"workspace_id"`
+}
+
+type WorkspaceRecord struct {
+	ID      string `json:"id"`
+	Email   string `json:"email"`
+	IsOwner bool   `json:"is_owner"`
+	Active  bool   `json:"active"`
 }
 
 type LoginArgs struct {
@@ -41,6 +77,7 @@ type LoginResult struct {
 	Email        string    `json:"email"`
 	Name         string    `json:"name"`
 	IsOwner      bool      `json:"is_owner"`
+	PendingOnly  bool      `json:"pending_only"`
 }
 
 type MeResult struct {
@@ -48,6 +85,7 @@ type MeResult struct {
 	Name           string `json:"name"`
 	IsOwner        bool   `json:"is_owner"`
 	WorkspaceEmail string `json:"workspace_email"`
+	PendingOnly    bool   `json:"pending_only"`
 }
 
 type InviteMemberArgs struct {
@@ -58,6 +96,19 @@ type InviteMemberArgs struct {
 type RemoveMemberArgs struct {
 	SessionToken string `json:"sessionToken"`
 	ID           string `json:"id"`
+}
+
+type InvitationArgs struct {
+	SessionToken string `json:"sessionToken"`
+	ID           string `json:"id"`
+}
+
+type WorkspaceInvitation struct {
+	ID             string    `json:"id"`
+	WorkspaceID    string    `json:"workspace_id"`
+	WorkspaceEmail string    `json:"workspace_email"`
+	Email          string    `json:"email"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type TeamMember struct {
@@ -99,8 +150,10 @@ type AgentRevokeAPIKeyArgs struct {
 }
 
 type CreateAPIKeyArgs struct {
-	SessionToken string `json:"sessionToken"`
-	Name         string `json:"name"`
+	SessionToken  string   `json:"sessionToken"`
+	Name          string   `json:"name"`
+	Scopes        []string `json:"scopes"`
+	ExpiresInDays int      `json:"expires_in_days"`
 }
 
 type RevokeAPIKeyArgs struct {
@@ -146,6 +199,7 @@ type SkillMeta struct {
 	Summary   string    `json:"summary"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	Approved  bool      `json:"approved"`
 }
 
 type Skill struct {
@@ -176,6 +230,9 @@ type APIKeyRecord struct {
 	Prefix    string     `json:"prefix"`
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	Scopes    []string   `json:"scopes"`
+	CreatedBy string     `json:"created_by,omitempty"`
 }
 
 type CreateAPIKeyResult struct {
@@ -210,12 +267,18 @@ func Register(app *gonvex.App) {
 	app.Mutation("auth.login", Login)
 	app.Mutation("auth.logout", Logout)
 	app.Query("auth.me", Me)
+	app.Query("auth.workspaces", ListWorkspaces)
+	app.Mutation("auth.switchWorkspace", SwitchWorkspace)
 	app.Query("team.list", ListTeamMembers)
 	app.Mutation("team.invite", InviteTeamMember)
 	app.Mutation("team.remove", RemoveTeamMember)
+	app.Query("team.invitations.list", ListInvitations)
+	app.Mutation("team.invitations.accept", AcceptInvitation)
+	app.Mutation("team.invitations.reject", RejectInvitation)
 	app.Query("skills.list", ListSkills)
 	app.Query("skills.get", GetSkill)
 	app.Mutation("skills.save", SaveSkill)
+	app.Mutation("skills.approve", ApproveSkill)
 	app.Mutation("skills.delete", DeleteSkill)
 	app.Query("apiKeys.list", ListAPIKeys)
 	app.Mutation("apiKeys.create", CreateAPIKey)
@@ -229,10 +292,12 @@ func Register(app *gonvex.App) {
 	app.Mutation("agent.skills.upload", AgentUploadSkill)
 	app.Mutation("agent.skills.delete", AgentDeleteSkill)
 	app.Query("agent.apiKeys.list", AgentListAPIKeys)
+	app.Query("agent.apiKeys.verify", AgentVerifyAPIKey)
 	// Deliberately no agent.apiKeys.create: a leaked API key must not be able
 	// to mint replacement keys that survive its own revocation. New keys come
 	// from a Google-verified session (UI or CLI browser flow) only.
 	app.Mutation("agent.apiKeys.revoke", AgentRevokeAPIKey)
+	app.Mutation("agent.apiKeys.revokeSelf", AgentRevokeSelf)
 	app.Query("agent.credentials.list", AgentListCredentials)
 	app.Query("agent.credentials.get", AgentGetCredential)
 	app.Mutation("agent.credentials.save", AgentSaveCredential)
@@ -250,6 +315,9 @@ func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
 	if err := ensureTables(ctx.Context, runner); err != nil {
 		return LoginResult{}, err
 	}
+	if len(args.IDToken) > 16<<10 {
+		return LoginResult{}, errors.New("google id token is too large")
+	}
 
 	info, err := verifyGoogleIDToken(ctx.Context, args.IDToken)
 	if err != nil {
@@ -261,11 +329,11 @@ func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
 		name = email
 	}
 	ownerID := "google:" + strings.TrimSpace(info.Subject)
-	workspaceID, err := resolveWorkspace(ctx.Context, runner, ownerID, email, info)
+	workspaceID, pendingOnly, err := resolveWorkspace(ctx.Context, runner, ownerID, email, info)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if err := upsertUser(ctx.Context, runner, ownerID, email, name); err != nil {
+	if err := upsertUser(ctx.Context, runner, ownerID, email, name, identityAllowed(info)); err != nil {
 		return LoginResult{}, err
 	}
 	if err := claimLegacyRows(ctx.Context, runner, ownerID, email); err != nil {
@@ -284,19 +352,22 @@ func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
 	now := time.Now().UTC()
 	expires := now.Add(sessionTTL)
 	_, err = runner.ExecContext(ctx.Context, `
-		insert into skill_sessions (id, owner_id, workspace_id, token_hash, created_at, expires_at)
-		values ($1, $2, $3, $4, $5, $6)
-	`, mustRandomID(), ownerID, workspaceID, hashToken(token), now, expires)
+		insert into skill_sessions (id, owner_id, workspace_id, token_hash, pending_only, created_at, expires_at)
+		values ($1, $2, $3, $4, $5, $6, $7)
+	`, mustRandomID(), ownerID, workspaceID, hashToken(token), pendingOnly, now, expires)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return LoginResult{SessionToken: token, ExpiresAt: expires, Email: email, Name: name, IsOwner: ownerID == workspaceID}, nil
+	return LoginResult{SessionToken: token, ExpiresAt: expires, Email: email, Name: name, IsOwner: ownerID == workspaceID && !pendingOnly, PendingOnly: pendingOnly}, nil
 }
 
-// resolveWorkspace decides whose data this login can access. An invited team
-// member joins the inviter's workspace; otherwise an allowlisted account owns
-// its own workspace.
-func resolveWorkspace(ctx context.Context, runner queryer, ownerID string, email string, info googleTokenInfo) (string, error) {
+// resolveWorkspace never silently moves an allowlisted owner into somebody
+// else's workspace. Non-owners receive a pending-only session until they
+// explicitly accept an invitation.
+func resolveWorkspace(ctx context.Context, runner queryer, ownerID string, email string, info googleTokenInfo) (string, bool, error) {
+	if identityAllowed(info) {
+		return ownerID, false, nil
+	}
 	var workspaceID string
 	err := runner.QueryRowContext(ctx, `
 		select workspace_owner_id
@@ -306,15 +377,25 @@ func resolveWorkspace(ctx context.Context, runner queryer, ownerID string, email
 		limit 1
 	`, email).Scan(&workspaceID)
 	if err == nil && strings.TrimSpace(workspaceID) != "" && workspaceID != ownerID {
-		return workspaceID, nil
+		return workspaceID, false, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
+		return "", false, err
 	}
-	if identityAllowed(info) {
-		return ownerID, nil
+	err = runner.QueryRowContext(ctx, `
+		select workspace_owner_id
+		from skill_workspace_invitations
+		where lower(email) = $1 and accepted_at is null and rejected_at is null
+		order by created_at desc
+		limit 1
+	`, email).Scan(&workspaceID)
+	if err == nil && strings.TrimSpace(workspaceID) != "" {
+		return workspaceID, true, nil
 	}
-	return "", errors.New("google account is not allowed for this vault")
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	return "", false, errors.New("google account is not allowed for this vault")
 }
 
 func Logout(ctx *gonvex.MutationCtx, args SessionArgs) (DeleteResult, error) {
@@ -341,12 +422,90 @@ func Me(ctx *gonvex.QueryCtx, args SessionArgs) (MeResult, error) {
 	if err != nil {
 		return MeResult{}, err
 	}
-	result := MeResult{IsOwner: identity.IsWorkspaceOwner()}
+	result := MeResult{IsOwner: identity.IsWorkspaceOwner(), PendingOnly: identity.PendingOnly}
 	result.Email, result.Name, _ = lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
 	if !result.IsOwner {
 		result.WorkspaceEmail, _, _ = lookupUser(ctx.Context, ctx.DB, identity.WorkspaceID)
 	}
 	return result, nil
+}
+
+func ListWorkspaces(ctx *gonvex.QueryCtx, args SessionArgs) ([]WorkspaceRecord, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return nil, err
+	}
+	email, _, err := lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ctx.DB.QueryContext(ctx.Context, `
+		select workspace_id, workspace_email, is_owner from (
+			select u.owner_id as workspace_id, u.email as workspace_email, true as is_owner
+			from skill_users u where u.owner_id = $1 and u.can_own
+			union
+			select m.workspace_owner_id, coalesce(owner.email, ''), false
+			from skill_workspace_members m
+			left join skill_users owner on owner.owner_id = m.workspace_owner_id
+			where lower(m.email) = lower($2)
+		) workspaces
+		order by is_owner desc, lower(workspace_email)
+	`, identity.OwnerID, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []WorkspaceRecord{}
+	for rows.Next() {
+		var workspace WorkspaceRecord
+		if err := rows.Scan(&workspace.ID, &workspace.Email, &workspace.IsOwner); err != nil {
+			return nil, err
+		}
+		workspace.Active = workspace.ID == identity.WorkspaceID
+		result = append(result, workspace)
+	}
+	return result, rows.Err()
+}
+
+func SwitchWorkspace(ctx *gonvex.MutationCtx, args SwitchWorkspaceArgs) (WorkspaceRecord, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return WorkspaceRecord{}, err
+	}
+	target := strings.TrimSpace(args.WorkspaceID)
+	if target == "" || len(target) > 240 {
+		return WorkspaceRecord{}, errors.New("valid workspace id is required")
+	}
+	email, _, err := lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if err != nil {
+		return WorkspaceRecord{}, err
+	}
+	var workspace WorkspaceRecord
+	err = mutationRunner(ctx).QueryRowContext(ctx.Context, `
+		select workspace_id, workspace_email, is_owner from (
+			select u.owner_id as workspace_id, u.email as workspace_email, true as is_owner
+			from skill_users u where u.owner_id = $1 and u.can_own
+			union
+			select m.workspace_owner_id, coalesce(owner.email, ''), false
+			from skill_workspace_members m
+			left join skill_users owner on owner.owner_id = m.workspace_owner_id
+			where lower(m.email) = lower($2)
+		) workspaces where workspace_id = $3 limit 1
+	`, identity.OwnerID, email, target).Scan(&workspace.ID, &workspace.Email, &workspace.IsOwner)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return WorkspaceRecord{}, errors.New("workspace access is not active")
+		}
+		return WorkspaceRecord{}, err
+	}
+	if _, err := mutationRunner(ctx).ExecContext(ctx.Context, `
+		update skill_sessions set workspace_id = $1, pending_only = false
+		where token_hash = $2 and owner_id = $3 and revoked_at is null
+	`, target, hashToken(args.SessionToken), identity.OwnerID); err != nil {
+		return WorkspaceRecord{}, err
+	}
+	workspace.Active = true
+	return workspace, nil
 }
 
 func lookupUser(ctx context.Context, db queryer, ownerID string) (string, string, error) {
@@ -359,6 +518,9 @@ func ListTeamMembers(ctx *gonvex.QueryCtx, args SessionArgs) ([]TeamMember, erro
 	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return nil, err
+	}
+	if identity.PendingOnly {
+		return nil, errors.New("accept or reject the pending workspace invitation first")
 	}
 	rows, err := ctx.DB.QueryContext(ctx.Context, `
 		select id, email, created_at
@@ -390,7 +552,7 @@ func InviteTeamMember(ctx *gonvex.MutationCtx, args InviteMemberArgs) (TeamMembe
 		return TeamMember{}, errors.New("only the workspace owner can invite members")
 	}
 	email := strings.ToLower(strings.TrimSpace(args.Email))
-	if !strings.Contains(email, "@") || strings.ContainsAny(email, " ,") {
+	if len(email) > 320 || !strings.Contains(email, "@") || strings.IndexFunc(email, unicode.IsSpace) >= 0 || strings.IndexFunc(email, unicode.IsControl) >= 0 || strings.Contains(email, ",") {
 		return TeamMember{}, errors.New("a valid google email is required")
 	}
 	runner := mutationRunner(ctx)
@@ -401,16 +563,148 @@ func InviteTeamMember(ctx *gonvex.MutationCtx, args InviteMemberArgs) (TeamMembe
 	if err != nil {
 		return TeamMember{}, err
 	}
+	ownerEmail, _, err := lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if err != nil {
+		return TeamMember{}, err
+	}
+	if strings.EqualFold(ownerEmail, email) {
+		return TeamMember{}, errors.New("the workspace owner cannot invite their own account")
+	}
+	var memberCount int
+	if err := runner.QueryRowContext(ctx.Context, `
+		select
+			(select count(*) from skill_workspace_members where workspace_owner_id = $1) +
+			(select count(*) from skill_workspace_invitations where workspace_owner_id = $1 and accepted_at is null and rejected_at is null)
+	`, identity.WorkspaceID).Scan(&memberCount); err != nil {
+		return TeamMember{}, err
+	}
+	if memberCount >= maxWorkspaceMembers {
+		return TeamMember{}, fmt.Errorf("workspace member limit reached (%d)", maxWorkspaceMembers)
+	}
 	now := time.Now().UTC()
 	_, err = runner.ExecContext(ctx.Context, `
-		insert into skill_workspace_members (id, workspace_owner_id, email, invited_by, created_at)
+		insert into skill_workspace_invitations (id, workspace_owner_id, email, invited_by, created_at)
 		values ($1, $2, $3, $4, $5)
-		on conflict (workspace_owner_id, email) do nothing
+		on conflict (workspace_owner_id, email) where accepted_at is null and rejected_at is null
+		do update set invited_by = excluded.invited_by, created_at = excluded.created_at
 	`, id, identity.WorkspaceID, email, identity.OwnerID, now)
 	if err != nil {
 		return TeamMember{}, err
 	}
 	return TeamMember{ID: id, Email: email, CreatedAt: now}, nil
+}
+
+func ListInvitations(ctx *gonvex.QueryCtx, args SessionArgs) ([]WorkspaceInvitation, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return nil, err
+	}
+	email, _, err := lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ctx.DB.QueryContext(ctx.Context, `
+		select i.id, i.workspace_owner_id, coalesce(u.email, ''), i.email, i.created_at
+		from skill_workspace_invitations i
+		left join skill_users u on u.owner_id = i.workspace_owner_id
+		where lower(i.email) = lower($1) and i.accepted_at is null and i.rejected_at is null
+		order by i.created_at desc
+	`, email)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []WorkspaceInvitation{}
+	for rows.Next() {
+		var invitation WorkspaceInvitation
+		if err := rows.Scan(&invitation.ID, &invitation.WorkspaceID, &invitation.WorkspaceEmail, &invitation.Email, &invitation.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, invitation)
+	}
+	return result, rows.Err()
+}
+
+func AcceptInvitation(ctx *gonvex.MutationCtx, args InvitationArgs) (TeamMember, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return TeamMember{}, err
+	}
+	email, _, err := lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if err != nil {
+		return TeamMember{}, err
+	}
+	runner := mutationRunner(ctx)
+	var invitation WorkspaceInvitation
+	err = runner.QueryRowContext(ctx.Context, `
+		select id, workspace_owner_id, email, created_at
+		from skill_workspace_invitations
+		where id = $1 and lower(email) = lower($2) and accepted_at is null and rejected_at is null
+		limit 1
+	`, strings.TrimSpace(args.ID), email).Scan(&invitation.ID, &invitation.WorkspaceID, &invitation.Email, &invitation.CreatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TeamMember{}, errors.New("pending invitation not found")
+		}
+		return TeamMember{}, err
+	}
+	memberID, err := randomID()
+	if err != nil {
+		return TeamMember{}, err
+	}
+	var existingWorkspace string
+	err = runner.QueryRowContext(ctx.Context, `
+		select workspace_owner_id from skill_workspace_members
+		where lower(email) = lower($1) and workspace_owner_id <> $2
+		limit 1
+	`, email, invitation.WorkspaceID).Scan(&existingWorkspace)
+	if err == nil {
+		return TeamMember{}, errors.New("this account already belongs to another shared workspace; leave it before accepting a different invitation")
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return TeamMember{}, err
+	}
+	if _, err := runner.ExecContext(ctx.Context, `
+		insert into skill_workspace_members (id, workspace_owner_id, email, invited_by, created_at)
+		select $1, workspace_owner_id, email, invited_by, now()
+		from skill_workspace_invitations where id = $2
+		on conflict (workspace_owner_id, email) do nothing
+	`, memberID, invitation.ID); err != nil {
+		return TeamMember{}, err
+	}
+	if _, err := runner.ExecContext(ctx.Context, `update skill_workspace_invitations set accepted_at = now() where id = $1`, invitation.ID); err != nil {
+		return TeamMember{}, err
+	}
+	if _, err := runner.ExecContext(ctx.Context, `
+		update skill_sessions set workspace_id = $1, pending_only = false
+		where token_hash = $2 and owner_id = $3 and revoked_at is null
+	`, invitation.WorkspaceID, hashToken(args.SessionToken), identity.OwnerID); err != nil {
+		return TeamMember{}, err
+	}
+	return TeamMember{ID: memberID, Email: invitation.Email, CreatedAt: time.Now().UTC()}, nil
+}
+
+func RejectInvitation(ctx *gonvex.MutationCtx, args InvitationArgs) (DeleteResult, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	email, _, err := lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	result, err := mutationRunner(ctx).ExecContext(ctx.Context, `
+		update skill_workspace_invitations set rejected_at = now()
+		where id = $1 and lower(email) = lower($2) and accepted_at is null and rejected_at is null
+	`, strings.TrimSpace(args.ID), email)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	count, _ := result.RowsAffected()
+	if identity.PendingOnly {
+		_, _ = mutationRunner(ctx).ExecContext(ctx.Context, `update skill_sessions set revoked_at = now() where token_hash = $1`, hashToken(args.SessionToken))
+	}
+	return DeleteResult{Deleted: count > 0}, nil
 }
 
 func RemoveTeamMember(ctx *gonvex.MutationCtx, args RemoveMemberArgs) (DeleteResult, error) {
@@ -427,7 +721,7 @@ func RemoveTeamMember(ctx *gonvex.MutationCtx, args RemoveMemberArgs) (DeleteRes
 	}
 	runner := mutationRunner(ctx)
 	var email string
-	err = ctx.DB.QueryRowContext(ctx.Context, `
+	err = runner.QueryRowContext(ctx.Context, `
 		select email from skill_workspace_members where workspace_owner_id = $1 and id = $2
 	`, identity.WorkspaceID, id).Scan(&email)
 	if err != nil {
@@ -453,6 +747,16 @@ func RemoveTeamMember(ctx *gonvex.MutationCtx, args RemoveMemberArgs) (DeleteRes
 	if err != nil {
 		return DeleteResult{}, err
 	}
+	// API keys are workspace-scoped capabilities. Revoke every key minted by
+	// the removed identity, otherwise it would outlive membership removal.
+	_, err = runner.ExecContext(ctx.Context, `
+		update skill_api_keys set revoked_at = now()
+		where owner_id = $1 and revoked_at is null
+			and created_by in (select owner_id from skill_users where lower(email) = $2)
+	`, identity.WorkspaceID, email)
+	if err != nil {
+		return DeleteResult{}, err
+	}
 	return DeleteResult{Deleted: true}, nil
 }
 
@@ -461,7 +765,7 @@ func ListSkills(ctx *gonvex.QueryCtx, args SessionArgs) ([]SkillMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	return listSkills(ctx.Context, ctx.DB, ownerID)
+	return listSkills(ctx.Context, ctx.DB, ownerID, false)
 }
 
 type GetSkillArgs struct {
@@ -475,16 +779,48 @@ func GetSkill(ctx *gonvex.QueryCtx, args GetSkillArgs) (Skill, error) {
 	if err != nil {
 		return Skill{}, err
 	}
-	return getSkill(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
+	return getSkill(ctx.Context, ctx.DB, ownerID, args.ID, args.Name, false)
 }
 
 func SaveSkill(ctx *gonvex.MutationCtx, args SaveSkillArgs) (Skill, error) {
-	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return Skill{}, err
 	}
+	if identity.PendingOnly {
+		return Skill{}, errors.New("accept or reject the pending workspace invitation first")
+	}
 	runner := mutationRunner(ctx)
-	return saveSkill(ctx.Context, runner, ownerID, args.ID, args.Name, args.Summary, args.Content)
+	return saveSkill(ctx.Context, runner, identity.WorkspaceID, args.ID, args.Name, args.Summary, args.Content, true, identity.OwnerID)
+}
+
+func ApproveSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (Skill, error) {
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
+	if err != nil {
+		return Skill{}, err
+	}
+	if !identity.IsWorkspaceOwner() {
+		return Skill{}, errors.New("only the workspace owner can approve agent-uploaded skills")
+	}
+	id := strings.TrimSpace(args.ID)
+	if id == "" {
+		return Skill{}, errors.New("skill id is required")
+	}
+	if len(id) > 240 {
+		return Skill{}, errors.New("skill id is too long")
+	}
+	result, err := mutationRunner(ctx).ExecContext(ctx.Context, `
+		update skills set approved_at = now(), approved_by = $1
+		where owner_id = $2 and id = $3
+	`, identity.OwnerID, identity.WorkspaceID, id)
+	if err != nil {
+		return Skill{}, err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return Skill{}, errors.New("skill not found")
+	}
+	return getSkill(ctx.Context, ctx.DB, identity.WorkspaceID, id, "", false)
 }
 
 func DeleteSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (DeleteResult, error) {
@@ -511,7 +847,7 @@ func listAPIKeys(ctx context.Context, db *sql.DB, ownerID string) ([]APIKeyRecor
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		select id, name, prefix, created_at, revoked_at
+		select id, name, prefix, created_at, revoked_at, expires_at, scopes, created_by
 		from skill_api_keys
 		where owner_id = $1
 		order by created_at desc
@@ -524,29 +860,62 @@ func listAPIKeys(ctx context.Context, db *sql.DB, ownerID string) ([]APIKeyRecor
 	records := []APIKeyRecord{}
 	for rows.Next() {
 		var record APIKeyRecord
-		if err := rows.Scan(&record.ID, &record.Name, &record.Prefix, &record.CreatedAt, &record.RevokedAt); err != nil {
+		var scopes string
+		if err := rows.Scan(&record.ID, &record.Name, &record.Prefix, &record.CreatedAt, &record.RevokedAt, &record.ExpiresAt, &scopes, &record.CreatedBy); err != nil {
 			return nil, err
 		}
+		record.Scopes = splitCSV(scopes)
 		records = append(records, record)
 	}
 	return records, rows.Err()
 }
 
 func CreateAPIKey(ctx *gonvex.MutationCtx, args CreateAPIKeyArgs) (CreateAPIKeyResult, error) {
-	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return CreateAPIKeyResult{}, err
 	}
-	return createAPIKey(ctx.Context, mutationRunner(ctx), ownerID, args.Name)
+	if identity.PendingOnly {
+		return CreateAPIKeyResult{}, errors.New("accept or reject the pending workspace invitation first")
+	}
+	return createAPIKey(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, identity.OwnerID, args.Name, args.Scopes, args.ExpiresInDays)
 }
 
-func createAPIKey(ctx context.Context, runner execer, ownerID string, keyName string) (CreateAPIKeyResult, error) {
+func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, createdBy string, keyName string, requestedScopes []string, expiresInDays int) (CreateAPIKeyResult, error) {
 	name := strings.TrimSpace(keyName)
 	if name == "" {
 		name = "Agent key"
 	}
 	if err := ensureTables(ctx, runner); err != nil {
 		return CreateAPIKeyResult{}, err
+	}
+	if len(name) > maxNameLength {
+		return CreateAPIKeyResult{}, fmt.Errorf("api key name must be at most %d characters", maxNameLength)
+	}
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return CreateAPIKeyResult{}, errors.New("api key name contains control characters")
+	}
+	var activeKeys int
+	if err := runner.QueryRowContext(ctx, `select count(*) from skill_api_keys where owner_id = $1 and revoked_at is null and expires_at > now()`, ownerID).Scan(&activeKeys); err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	if activeKeys >= maxWorkspaceKeys {
+		return CreateAPIKeyResult{}, fmt.Errorf("active api key limit reached (%d)", maxWorkspaceKeys)
+	}
+	scopes, err := normalizeScopes(requestedScopes)
+	if err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	if len(scopes) == 0 {
+		scopes = []string{scopeSkillsRead}
+	}
+	maxDays := int(maxAPIKeyTTL / (24 * time.Hour))
+	if expiresInDays < 0 || expiresInDays > maxDays {
+		return CreateAPIKeyResult{}, fmt.Errorf("api keys may expire at most %d days from creation", maxDays)
+	}
+	ttl := defaultAPIKeyTTL
+	if expiresInDays > 0 {
+		ttl = time.Duration(expiresInDays) * 24 * time.Hour
 	}
 	id, err := randomID()
 	if err != nil {
@@ -561,15 +930,16 @@ func createAPIKey(ctx context.Context, runner execer, ownerID string, keyName st
 		prefix = prefix[:14]
 	}
 	now := time.Now().UTC()
+	expiresAt := now.Add(ttl)
 	_, err = runner.ExecContext(ctx, `
-		insert into skill_api_keys (id, owner_id, name, key_hash, prefix, created_at)
-		values ($1, $2, $3, $4, $5, $6)
-	`, id, ownerID, name, hashToken(apiKey), prefix, now)
+		insert into skill_api_keys (id, owner_id, created_by, name, key_hash, prefix, scopes, created_at, expires_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, id, ownerID, createdBy, name, hashToken(apiKey), prefix, strings.Join(scopes, ","), now, expiresAt)
 	if err != nil {
 		return CreateAPIKeyResult{}, err
 	}
 	return CreateAPIKeyResult{
-		Record: APIKeyRecord{ID: id, Name: name, Prefix: prefix, CreatedAt: now},
+		Record: APIKeyRecord{ID: id, Name: name, Prefix: prefix, CreatedAt: now, ExpiresAt: expiresAt, Scopes: scopes, CreatedBy: createdBy},
 		APIKey: apiKey,
 	}, nil
 }
@@ -586,6 +956,9 @@ func revokeAPIKey(ctx context.Context, runner execer, ownerID string, apiKeyID s
 	id := strings.TrimSpace(apiKeyID)
 	if id == "" {
 		return DeleteResult{}, errors.New("api key id is required")
+	}
+	if len(id) > 240 {
+		return DeleteResult{}, errors.New("api key id is too long")
 	}
 	if err := ensureTables(ctx, runner); err != nil {
 		return DeleteResult{}, err
@@ -624,18 +997,23 @@ func SaveCredential(ctx *gonvex.MutationCtx, args SaveCredentialArgs) (Credentia
 
 func saveCredential(ctx context.Context, runner execQueryer, ownerID string, credentialID string, credentialName string, credentialSummary string, credentialValue string) (CredentialMeta, error) {
 	name := strings.TrimSpace(credentialName)
-	value := strings.TrimSpace(credentialValue)
+	value := credentialValue
 	if name == "" {
 		return CredentialMeta{}, errors.New("credential name is required")
 	}
 	if value == "" {
 		return CredentialMeta{}, errors.New("credential value is required")
 	}
-	if err := ensureTables(ctx, runner); err != nil {
-		return CredentialMeta{}, err
+	if len(name) > maxNameLength || len(credentialSummary) > maxSummaryLength {
+		return CredentialMeta{}, errors.New("credential name or summary exceeds the allowed length")
 	}
-	storedValue, err := encryptSecret(value)
-	if err != nil {
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 || strings.IndexFunc(credentialSummary, unicode.IsControl) >= 0 {
+		return CredentialMeta{}, errors.New("credential name or summary contains control characters")
+	}
+	if len(value) > maxCredentialValueSize {
+		return CredentialMeta{}, fmt.Errorf("credential value exceeds the %d-byte limit", maxCredentialValueSize)
+	}
+	if err := ensureTables(ctx, runner); err != nil {
 		return CredentialMeta{}, err
 	}
 	id := strings.TrimSpace(credentialID)
@@ -646,7 +1024,27 @@ func saveCredential(ctx context.Context, runner execQueryer, ownerID string, cre
 		}
 		id = nextID
 	}
+	if len(id) > 240 {
+		return CredentialMeta{}, errors.New("credential id is too long")
+	}
 	id = scopedID(ownerID, id)
+	var exists bool
+	if err := runner.QueryRowContext(ctx, `select exists(select 1 from skill_credentials where owner_id = $1 and id = $2)`, ownerID, id).Scan(&exists); err != nil {
+		return CredentialMeta{}, err
+	}
+	if !exists {
+		var count int
+		if err := runner.QueryRowContext(ctx, `select count(*) from skill_credentials where owner_id = $1`, ownerID).Scan(&count); err != nil {
+			return CredentialMeta{}, err
+		}
+		if count >= maxWorkspaceCredentials {
+			return CredentialMeta{}, fmt.Errorf("workspace credential limit reached (%d)", maxWorkspaceCredentials)
+		}
+	}
+	storedValue, err := encryptSecret(ownerID, id, value)
+	if err != nil {
+		return CredentialMeta{}, err
+	}
 	now := time.Now().UTC()
 	var createdAt time.Time
 	err = runner.QueryRowContext(ctx, `
@@ -690,31 +1088,31 @@ func deleteCredential(ctx context.Context, runner execer, ownerID string, creden
 }
 
 func AgentListSkills(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]SkillMeta, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsRead)
 	if err != nil {
 		return nil, err
 	}
-	return listSkills(ctx.Context, ctx.DB, ownerID)
+	return listSkills(ctx.Context, ctx.DB, ownerID, true)
 }
 
 func AgentGetSkill(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Skill, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsRead)
 	if err != nil {
 		return Skill{}, err
 	}
-	return getSkill(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
+	return getSkill(ctx.Context, ctx.DB, ownerID, args.ID, args.Name, true)
 }
 
 func AgentUploadSkill(ctx *gonvex.MutationCtx, args AgentSaveSkillArgs) (Skill, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsWrite)
 	if err != nil {
 		return Skill{}, err
 	}
-	return saveSkill(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Content)
+	return saveSkill(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Content, false, "")
 }
 
 func AgentDeleteSkill(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResult, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsWrite)
 	if err != nil {
 		return DeleteResult{}, err
 	}
@@ -722,23 +1120,53 @@ func AgentDeleteSkill(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResul
 }
 
 func AgentListAPIKeys(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]APIKeyRecord, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeKeysRead)
 	if err != nil {
 		return nil, err
 	}
 	return listAPIKeys(ctx.Context, ctx.DB, ownerID)
 }
 
+func AgentVerifyAPIKey(ctx *gonvex.QueryCtx, args AgentSkillArgs) (DeleteResult, error) {
+	_, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, "")
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	return DeleteResult{Deleted: true}, nil
+}
+
 func AgentRevokeAPIKey(ctx *gonvex.MutationCtx, args AgentRevokeAPIKeyArgs) (DeleteResult, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeKeysRevoke)
 	if err != nil {
 		return DeleteResult{}, err
 	}
 	return revokeAPIKey(ctx.Context, mutationRunner(ctx), ownerID, args.ID)
 }
 
+func AgentRevokeSelf(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResult, error) {
+	apiKey := strings.TrimSpace(args.APIKey)
+	if apiKey == "" {
+		return DeleteResult{}, errors.New("api key is required")
+	}
+	if len(apiKey) > 256 {
+		return DeleteResult{}, errors.New("invalid api key")
+	}
+	if err := ensureTables(ctx.Context, mutationRunner(ctx)); err != nil {
+		return DeleteResult{}, err
+	}
+	result, err := mutationRunner(ctx).ExecContext(ctx.Context, `
+		update skill_api_keys set revoked_at = now()
+		where key_hash = $1 and revoked_at is null and expires_at > now()
+	`, hashToken(apiKey))
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	count, _ := result.RowsAffected()
+	return DeleteResult{Deleted: count > 0}, nil
+}
+
 func AgentListCredentials(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]CredentialMeta, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsRead)
 	if err != nil {
 		return nil, err
 	}
@@ -746,7 +1174,7 @@ func AgentListCredentials(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]Credenti
 }
 
 func AgentGetCredential(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Credential, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsRead)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -774,16 +1202,25 @@ func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, n
 		}
 		return Credential{}, err
 	}
-	value, err := decryptSecret(credential.Value)
+	value, migrate, err := decryptSecret(ownerID, credential.ID, credential.Value)
 	if err != nil {
 		return Credential{}, err
+	}
+	if migrate {
+		stored, err := encryptSecret(ownerID, credential.ID, value)
+		if err != nil {
+			return Credential{}, err
+		}
+		if _, err := db.ExecContext(ctx, `update skill_credentials set secret_value = $1 where owner_id = $2 and id = $3`, stored, ownerID, credential.ID); err != nil {
+			return Credential{}, fmt.Errorf("migrate credential encryption: %w", err)
+		}
 	}
 	credential.Value = value
 	return credential, nil
 }
 
 func AgentSaveCredential(ctx *gonvex.MutationCtx, args AgentSaveCredentialArgs) (CredentialMeta, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsWrite)
 	if err != nil {
 		return CredentialMeta{}, err
 	}
@@ -791,7 +1228,7 @@ func AgentSaveCredential(ctx *gonvex.MutationCtx, args AgentSaveCredentialArgs) 
 }
 
 func AgentDeleteCredential(ctx *gonvex.MutationCtx, args AgentDeleteCredentialArgs) (DeleteResult, error) {
-	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey)
+	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsWrite)
 	if err != nil {
 		return DeleteResult{}, err
 	}
@@ -800,7 +1237,7 @@ func AgentDeleteCredential(ctx *gonvex.MutationCtx, args AgentDeleteCredentialAr
 
 // listSkills intentionally returns metadata only; fetch content per skill via
 // skills.get / agent.skills.get so lists stay cheap as the vault grows.
-func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]SkillMeta, error) {
+func listSkills(ctx context.Context, db *sql.DB, ownerID string, approvedOnly bool) ([]SkillMeta, error) {
 	if db == nil {
 		return []SkillMeta{}, nil
 	}
@@ -808,11 +1245,11 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]SkillMeta, e
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		select id, name, summary, created_at, updated_at
+		select id, name, summary, created_at, updated_at, approved_at is not null
 		from skills
-		where owner_id = $1
+		where owner_id = $1 and (not $2 or approved_at is not null)
 		order by lower(name), updated_at desc
-	`, ownerID)
+	`, ownerID, approvedOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -821,7 +1258,7 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]SkillMeta, e
 	byKey := map[string]SkillMeta{}
 	for rows.Next() {
 		var skill SkillMeta
-		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.CreatedAt, &skill.UpdatedAt); err != nil {
+		if err := rows.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.CreatedAt, &skill.UpdatedAt, &skill.Approved); err != nil {
 			return nil, err
 		}
 		key := skillIdentityKey(skill.ID, skill.Name)
@@ -847,7 +1284,7 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string) ([]SkillMeta, e
 	return skills, nil
 }
 
-func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name string) (Skill, error) {
+func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name string, approvedOnly bool) (Skill, error) {
 	if db == nil {
 		return Skill{}, errors.New("database is not configured")
 	}
@@ -855,14 +1292,15 @@ func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name s
 		return Skill{}, err
 	}
 	row := db.QueryRowContext(ctx, `
-		select id, name, summary, content, created_at, updated_at
+		select id, name, summary, content, created_at, updated_at, approved_at is not null
 		from skills
 		where owner_id = $1 and (($2 <> '' and id = $2) or ($3 <> '' and lower(name) = lower($3)))
+			and (not $4 or approved_at is not null)
 		order by updated_at desc
 		limit 1
-	`, ownerID, strings.TrimSpace(id), strings.TrimSpace(name))
+	`, ownerID, strings.TrimSpace(id), strings.TrimSpace(name), approvedOnly)
 	var skill Skill
-	if err := row.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.Content, &skill.CreatedAt, &skill.UpdatedAt); err != nil {
+	if err := row.Scan(&skill.ID, &skill.Name, &skill.Summary, &skill.Content, &skill.CreatedAt, &skill.UpdatedAt, &skill.Approved); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Skill{}, errors.New("skill not found")
 		}
@@ -871,7 +1309,7 @@ func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name s
 	return skill, nil
 }
 
-func saveSkill(ctx context.Context, runner execQueryer, ownerID string, id string, name string, summary string, content string) (Skill, error) {
+func saveSkill(ctx context.Context, runner execQueryer, ownerID string, id string, name string, summary string, content string, approved bool, approvedBy string) (Skill, error) {
 	name = strings.TrimSpace(name)
 	content = strings.TrimSpace(content)
 	if name == "" {
@@ -879,6 +1317,15 @@ func saveSkill(ctx context.Context, runner execQueryer, ownerID string, id strin
 	}
 	if content == "" {
 		return Skill{}, errors.New("skill content is required")
+	}
+	if len(name) > maxNameLength || len(summary) > maxSummaryLength {
+		return Skill{}, errors.New("skill name or summary exceeds the allowed length")
+	}
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 || strings.IndexFunc(summary, unicode.IsControl) >= 0 {
+		return Skill{}, errors.New("skill name or summary contains control characters")
+	}
+	if len(content) > maxSkillContentBytes {
+		return Skill{}, fmt.Errorf("skill content exceeds the %d-byte limit", maxSkillContentBytes)
 	}
 	if err := ensureTables(ctx, runner); err != nil {
 		return Skill{}, err
@@ -893,23 +1340,46 @@ func saveSkill(ctx context.Context, runner execQueryer, ownerID string, id strin
 		}
 		id = nextID
 	}
+	if len(id) > 240 {
+		return Skill{}, errors.New("skill id is too long")
+	}
 	id = existingSkillID(ctx, runner, ownerID, id, name)
+	var exists bool
+	if err := runner.QueryRowContext(ctx, `select exists(select 1 from skills where owner_id = $1 and id = $2)`, ownerID, id).Scan(&exists); err != nil {
+		return Skill{}, err
+	}
+	if !exists {
+		var count int
+		if err := runner.QueryRowContext(ctx, `select count(*) from skills where owner_id = $1`, ownerID).Scan(&count); err != nil {
+			return Skill{}, err
+		}
+		if count >= maxWorkspaceSkills {
+			return Skill{}, fmt.Errorf("workspace skill limit reached (%d)", maxWorkspaceSkills)
+		}
+	}
+	var approvedAt *time.Time
+	if approved {
+		approvedAt = &now
+	}
 	var createdAt time.Time
 	err := runner.QueryRowContext(ctx, `
-		insert into skills (id, owner_id, name, summary, content, created_at, updated_at)
-		values ($1, $2, $3, $4, $5, $6, $6)
+		insert into skills (id, owner_id, name, summary, content, content_hash, approved_at, approved_by, created_at, updated_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 		on conflict (id) do update set
 			name = excluded.name,
 			summary = excluded.summary,
 			content = excluded.content,
+			content_hash = excluded.content_hash,
+			approved_at = excluded.approved_at,
+			approved_by = excluded.approved_by,
 			updated_at = excluded.updated_at
 		returning created_at
-	`, id, ownerID, name, strings.TrimSpace(summary), content, now).Scan(&createdAt)
+	`, id, ownerID, name, strings.TrimSpace(summary), content, hashToken(content), approvedAt, approvedBy, now).Scan(&createdAt)
 	if err != nil {
 		return Skill{}, err
 	}
 	return Skill{
-		SkillMeta: SkillMeta{ID: id, Name: name, Summary: strings.TrimSpace(summary), CreatedAt: createdAt, UpdatedAt: now},
+		SkillMeta: SkillMeta{ID: id, Name: name, Summary: strings.TrimSpace(summary), CreatedAt: createdAt, UpdatedAt: now, Approved: approved},
 		Content:   content,
 	}, nil
 }
@@ -1012,11 +1482,17 @@ func mutationRunner(ctx *gonvex.MutationCtx) execQueryer {
 // ensureTablesDone skips schema DDL after the first successful run so every
 // query/mutation is not paying for ~20 idempotent statements.
 var ensureTablesDone atomic.Bool
+var ensureTablesMu sync.Mutex
 
 func ensureTables(ctx context.Context, db execer) error {
 	if db == nil {
 		return errors.New("database is not configured")
 	}
+	if ensureTablesDone.Load() {
+		return nil
+	}
+	ensureTablesMu.Lock()
+	defer ensureTablesMu.Unlock()
 	if ensureTablesDone.Load() {
 		return nil
 	}
@@ -1028,6 +1504,7 @@ func ensureTables(ctx context.Context, db execer) error {
 			owner_id text primary key,
 			email text not null,
 			name text not null default '',
+			can_own boolean not null default false,
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now()
 		)`,
@@ -1038,21 +1515,29 @@ func ensureTables(ctx context.Context, db execer) error {
 			summary text not null default '',
 			content text not null,
 			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now()
+			updated_at timestamptz not null default now(),
+			content_hash text not null default '',
+			approved_at timestamptz,
+			approved_by text not null default ''
 		)`,
 		`create table if not exists skill_api_keys (
 			id text primary key,
 			owner_id text not null default '',
+			created_by text not null default '',
 			name text not null,
 			key_hash text not null unique,
 			prefix text not null,
+			scopes text not null default 'skills:read,skills:write,credentials:read,credentials:write,keys:read,keys:revoke',
 			created_at timestamptz not null default now(),
+			expires_at timestamptz not null default (now() + interval '30 days'),
 			revoked_at timestamptz
 		)`,
 		`create table if not exists skill_sessions (
 			id text primary key,
 			owner_id text not null default '',
+			workspace_id text not null default '',
 			token_hash text not null unique,
+			pending_only boolean not null default false,
 			created_at timestamptz not null default now(),
 			expires_at timestamptz not null,
 			revoked_at timestamptz
@@ -1073,17 +1558,37 @@ func ensureTables(ctx context.Context, db execer) error {
 			invited_by text not null default '',
 			created_at timestamptz not null default now()
 		)`,
+		`create table if not exists skill_workspace_invitations (
+			id text primary key,
+			workspace_owner_id text not null,
+			email text not null,
+			invited_by text not null default '',
+			created_at timestamptz not null default now(),
+			accepted_at timestamptz,
+			rejected_at timestamptz
+		)`,
 		`alter table skills add column if not exists owner_id text not null default ''`,
+		`alter table skill_users add column if not exists can_own boolean not null default false`,
+		`alter table skills add column if not exists content_hash text not null default ''`,
+		`alter table skills add column if not exists approved_at timestamptz`,
+		`alter table skills add column if not exists approved_by text not null default ''`,
 		`alter table skill_api_keys add column if not exists owner_id text not null default ''`,
+		`alter table skill_api_keys add column if not exists created_by text not null default ''`,
+		`alter table skill_api_keys add column if not exists scopes text not null default 'skills:read,skills:write,credentials:read,credentials:write,keys:read,keys:revoke'`,
+		`alter table skill_api_keys add column if not exists expires_at timestamptz not null default (now() + interval '30 days')`,
 		`alter table skill_sessions add column if not exists owner_id text not null default ''`,
 		`alter table skill_sessions add column if not exists workspace_id text not null default ''`,
+		`alter table skill_sessions add column if not exists pending_only boolean not null default false`,
 		`alter table skill_credentials add column if not exists owner_id text not null default ''`,
+		`update skill_api_keys set created_by = owner_id where created_by = ''`,
+		`update skills set approved_at = created_at, approved_by = owner_id, content_hash = md5(content) where approved_at is null and approved_by = '' and content_hash = ''`,
 		`create index if not exists skills_by_owner_name on skills(owner_id, lower(name))`,
 		`create index if not exists skills_by_owner_updated_at on skills(owner_id, updated_at)`,
 		`create index if not exists skill_api_keys_by_owner_created_at on skill_api_keys(owner_id, created_at)`,
 		`create index if not exists skill_sessions_by_owner_token_hash on skill_sessions(owner_id, token_hash)`,
 		`create index if not exists skill_credentials_by_owner_name on skill_credentials(owner_id, lower(name))`,
 		`create unique index if not exists skill_workspace_members_unique on skill_workspace_members(workspace_owner_id, email)`,
+		`create unique index if not exists skill_workspace_invitations_pending_unique on skill_workspace_invitations(workspace_owner_id, email) where accepted_at is null and rejected_at is null`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -1097,10 +1602,11 @@ func ensureTables(ctx context.Context, db execer) error {
 type sessionIdentity struct {
 	OwnerID     string
 	WorkspaceID string
+	PendingOnly bool
 }
 
 func (s sessionIdentity) IsWorkspaceOwner() bool {
-	return s.OwnerID == s.WorkspaceID
+	return s.OwnerID == s.WorkspaceID && !s.PendingOnly
 }
 
 // verifySession returns the workspace id the session may read and write.
@@ -1110,6 +1616,9 @@ func verifySession(ctx context.Context, db *sql.DB, token string) (string, error
 	if err != nil {
 		return "", err
 	}
+	if identity.PendingOnly {
+		return "", errors.New("accept or reject the pending workspace invitation first")
+	}
 	return identity.WorkspaceID, nil
 }
 
@@ -1118,6 +1627,9 @@ func verifySessionIdentity(ctx context.Context, db *sql.DB, token string) (sessi
 	if token == "" {
 		return sessionIdentity{}, errors.New("session token is required")
 	}
+	if len(token) > 256 {
+		return sessionIdentity{}, errors.New("invalid session")
+	}
 	if db == nil {
 		return sessionIdentity{}, errors.New("database is not configured")
 	}
@@ -1125,12 +1637,13 @@ func verifySessionIdentity(ctx context.Context, db *sql.DB, token string) (sessi
 		return sessionIdentity{}, err
 	}
 	var ownerID, workspaceID string
+	var pendingOnly bool
 	err := db.QueryRowContext(ctx, `
-		select owner_id, coalesce(workspace_id, '')
+		select owner_id, coalesce(workspace_id, ''), pending_only
 		from skill_sessions
 		where token_hash = $1 and revoked_at is null and expires_at > now()
 		limit 1
-	`, hashToken(token)).Scan(&ownerID, &workspaceID)
+	`, hashToken(token)).Scan(&ownerID, &workspaceID, &pendingOnly)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return sessionIdentity{}, errors.New("invalid session")
@@ -1143,13 +1656,32 @@ func verifySessionIdentity(ctx context.Context, db *sql.DB, token string) (sessi
 	if strings.TrimSpace(workspaceID) == "" {
 		workspaceID = ownerID
 	}
-	return sessionIdentity{OwnerID: ownerID, WorkspaceID: workspaceID}, nil
+	if workspaceID != ownerID && !pendingOnly {
+		var active bool
+		err := db.QueryRowContext(ctx, `
+			select exists(
+				select 1 from skill_workspace_members m
+				join skill_users u on u.owner_id = $1
+				where m.workspace_owner_id = $2 and lower(m.email) = lower(u.email)
+			)
+		`, ownerID, workspaceID).Scan(&active)
+		if err != nil {
+			return sessionIdentity{}, err
+		}
+		if !active {
+			return sessionIdentity{}, errors.New("workspace membership is no longer active")
+		}
+	}
+	return sessionIdentity{OwnerID: ownerID, WorkspaceID: workspaceID, PendingOnly: pendingOnly}, nil
 }
 
-func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string) (string, error) {
+func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string, requiredScope string) (string, error) {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
 		return "", errors.New("api key is required")
+	}
+	if len(apiKey) > 256 {
+		return "", errors.New("invalid api key")
 	}
 	if db == nil {
 		return "", errors.New("database is not configured")
@@ -1157,8 +1689,13 @@ func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string) (string, error
 	if err := ensureTables(ctx, db); err != nil {
 		return "", err
 	}
-	var ownerID string
-	err := db.QueryRowContext(ctx, `select owner_id from skill_api_keys where key_hash = $1 and revoked_at is null limit 1`, hashToken(apiKey)).Scan(&ownerID)
+	var ownerID, createdBy, scopes string
+	err := db.QueryRowContext(ctx, `
+		select owner_id, created_by, scopes
+		from skill_api_keys
+		where key_hash = $1 and revoked_at is null and expires_at > now()
+		limit 1
+	`, hashToken(apiKey)).Scan(&ownerID, &createdBy, &scopes)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", errors.New("invalid api key")
@@ -1168,7 +1705,59 @@ func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string) (string, error
 	if strings.TrimSpace(ownerID) == "" {
 		return "", errors.New("invalid api key owner")
 	}
+	if requiredScope != "" && !scopeAllowed(scopes, requiredScope) {
+		return "", fmt.Errorf("api key is missing required scope %s", requiredScope)
+	}
+	if createdBy != "" && createdBy != ownerID {
+		var active bool
+		if err := db.QueryRowContext(ctx, `
+			select exists(
+				select 1 from skill_workspace_members m
+				join skill_users u on u.owner_id = $1
+				where m.workspace_owner_id = $2 and lower(m.email) = lower(u.email)
+			)
+		`, createdBy, ownerID).Scan(&active); err != nil {
+			return "", err
+		}
+		if !active {
+			return "", errors.New("api key creator is no longer a workspace member")
+		}
+	}
 	return ownerID, nil
+}
+
+func normalizeScopes(requested []string) ([]string, error) {
+	allowed := map[string]bool{
+		scopeSkillsRead: true, scopeSkillsWrite: true,
+		scopeCredentialsRead: true, scopeCredentialsWrite: true,
+		scopeKeysRead: true, scopeKeysRevoke: true,
+	}
+	unique := map[string]bool{}
+	for _, scope := range requested {
+		scope = strings.ToLower(strings.TrimSpace(scope))
+		if scope == "" {
+			continue
+		}
+		if !allowed[scope] {
+			return nil, fmt.Errorf("unsupported api key scope %q", scope)
+		}
+		unique[scope] = true
+	}
+	result := make([]string, 0, len(unique))
+	for scope := range unique {
+		result = append(result, scope)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func scopeAllowed(scopes string, required string) bool {
+	for _, scope := range splitCSV(scopes) {
+		if scope == required {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyGoogleIDToken(ctx context.Context, idToken string) (googleTokenInfo, error) {
@@ -1184,7 +1773,8 @@ func verifyGoogleIDToken(ctx context.Context, idToken string) (googleTokenInfo, 
 	if err != nil {
 		return googleTokenInfo{}, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return googleTokenInfo{}, fmt.Errorf("verify google token: %w", err)
 	}
@@ -1193,7 +1783,7 @@ func verifyGoogleIDToken(ctx context.Context, idToken string) (googleTokenInfo, 
 		return googleTokenInfo{}, errors.New("google token verification failed")
 	}
 	var info googleTokenInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&info); err != nil {
 		return googleTokenInfo{}, err
 	}
 	if info.Audience != clientID {
@@ -1245,15 +1835,16 @@ func splitCSV(value string) []string {
 	return out
 }
 
-func upsertUser(ctx context.Context, runner execer, ownerID string, email string, name string) error {
+func upsertUser(ctx context.Context, runner execer, ownerID string, email string, name string, canOwn bool) error {
 	_, err := runner.ExecContext(ctx, `
-		insert into skill_users (owner_id, email, name, created_at, updated_at)
-		values ($1, $2, $3, now(), now())
+		insert into skill_users (owner_id, email, name, can_own, created_at, updated_at)
+		values ($1, $2, $3, $4, now(), now())
 		on conflict (owner_id) do update set
 			email = excluded.email,
 			name = excluded.name,
+			can_own = excluded.can_own,
 			updated_at = excluded.updated_at
-	`, ownerID, email, name)
+	`, ownerID, email, name, canOwn)
 	return err
 }
 
@@ -1271,7 +1862,7 @@ func claimLegacyRows(ctx context.Context, runner execer, ownerID string, email s
 	}
 	statements := []string{
 		`update skills set owner_id = $1 where owner_id = ''`,
-		`update skill_api_keys set owner_id = $1 where owner_id = ''`,
+		`update skill_api_keys set owner_id = $1, created_by = $1 where owner_id = ''`,
 		`update skill_credentials set owner_id = $1 where owner_id = ''`,
 	}
 	for _, statement := range statements {
@@ -1299,75 +1890,134 @@ func hashToken(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Credential values are encrypted at rest with AES-256-GCM when
-// SKILLS_SECRET_KEY is configured, so a database dump alone does not expose
-// secrets. Legacy plaintext rows (no prefix) are still readable and get
-// re-encrypted the next time they are saved.
-const encryptedValuePrefix = "encv1:"
+// encv2 binds ciphertext to its workspace and credential id using GCM AAD.
+// SKILLS_SECRET_KEY_PREVIOUS may contain comma-separated prior 256-bit keys
+// during rotation. Plaintext and encv1 rows are migrated when read.
+const (
+	encryptedValuePrefix       = "encv2:"
+	legacyEncryptedValuePrefix = "encv1:"
+)
 
-func credentialAEAD() (cipher.AEAD, error) {
-	raw := strings.TrimSpace(os.Getenv("SKILLS_SECRET_KEY"))
+type credentialCipher struct {
+	id   string
+	aead cipher.AEAD
+}
+
+func decodeCredentialKey(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, nil
+		return nil, errors.New("credential encryption key is empty")
 	}
-	var key []byte
-	if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) == 32 {
-		key = decoded
-	} else if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
-		key = decoded
-	} else if decoded, err := base64.RawStdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
-		key = decoded
-	} else {
-		// Any other passphrase is stretched to 32 bytes.
-		sum := sha256.Sum256([]byte(raw))
-		key = sum[:]
+	decoders := []func(string) ([]byte, error){
+		hex.DecodeString,
+		base64.StdEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+	}
+	for _, decode := range decoders {
+		if key, err := decode(raw); err == nil && len(key) == 32 {
+			return key, nil
+		}
+	}
+	return nil, errors.New("credential encryption keys must be exactly 32 bytes encoded as hex or base64")
+}
+
+func newCredentialCipher(raw string) (credentialCipher, error) {
+	key, err := decodeCredentialKey(raw)
+	if err != nil {
+		return credentialCipher{}, err
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, err
+		return credentialCipher{}, err
 	}
-	return cipher.NewGCM(block)
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return credentialCipher{}, err
+	}
+	return credentialCipher{id: hashToken(string(key))[:12], aead: aead}, nil
 }
 
-func encryptSecret(value string) (string, error) {
-	aead, err := credentialAEAD()
+func credentialCiphers() ([]credentialCipher, error) {
+	current := strings.TrimSpace(os.Getenv("SKILLS_SECRET_KEY"))
+	if current == "" {
+		return nil, errors.New("SKILLS_SECRET_KEY must be configured before credentials can be stored or read")
+	}
+	rawKeys := append([]string{current}, splitCSV(os.Getenv("SKILLS_SECRET_KEY_PREVIOUS"))...)
+	result := make([]credentialCipher, 0, len(rawKeys))
+	seen := map[string]bool{}
+	for _, raw := range rawKeys {
+		item, err := newCredentialCipher(raw)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[item.id] {
+			seen[item.id] = true
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func credentialAAD(ownerID, credentialID string) []byte {
+	return []byte("whagons-skills/credential/" + ownerID + "/" + credentialID)
+}
+
+func encryptSecret(ownerID, credentialID, value string) (string, error) {
+	ciphers, err := credentialCiphers()
 	if err != nil {
 		return "", err
 	}
-	if aead == nil {
-		return value, nil
-	}
-	nonce := make([]byte, aead.NonceSize())
+	current := ciphers[0]
+	nonce := make([]byte, current.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("generate nonce: %w", err)
 	}
-	sealed := aead.Seal(nonce, nonce, []byte(value), nil)
-	return encryptedValuePrefix + base64.RawStdEncoding.EncodeToString(sealed), nil
+	sealed := current.aead.Seal(nonce, nonce, []byte(value), credentialAAD(ownerID, credentialID))
+	return encryptedValuePrefix + current.id + ":" + base64.RawStdEncoding.EncodeToString(sealed), nil
 }
 
-func decryptSecret(value string) (string, error) {
-	if !strings.HasPrefix(value, encryptedValuePrefix) {
-		return value, nil
-	}
-	aead, err := credentialAEAD()
+func decryptSecret(ownerID, credentialID, value string) (string, bool, error) {
+	ciphers, err := credentialCiphers()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if aead == nil {
-		return "", errors.New("credential is encrypted but SKILLS_SECRET_KEY is not configured")
+	if strings.HasPrefix(value, encryptedValuePrefix) {
+		parts := strings.SplitN(value, ":", 3)
+		if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+			return "", false, errors.New("encrypted credential is malformed")
+		}
+		sealed, err := base64.RawStdEncoding.DecodeString(parts[2])
+		if err != nil {
+			return "", false, errors.New("encrypted credential is malformed")
+		}
+		for index, item := range ciphers {
+			if item.id != parts[1] || len(sealed) < item.aead.NonceSize() {
+				continue
+			}
+			plain, err := item.aead.Open(nil, sealed[:item.aead.NonceSize()], sealed[item.aead.NonceSize():], credentialAAD(ownerID, credentialID))
+			if err == nil {
+				return string(plain), index != 0, nil
+			}
+		}
+		return "", false, errors.New("credential decryption failed")
 	}
-	sealed, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, encryptedValuePrefix))
-	if err != nil {
-		return "", err
+	if strings.HasPrefix(value, legacyEncryptedValuePrefix) {
+		sealed, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, legacyEncryptedValuePrefix))
+		if err != nil {
+			return "", false, errors.New("legacy encrypted credential is malformed")
+		}
+		for _, item := range ciphers {
+			if len(sealed) < item.aead.NonceSize() {
+				continue
+			}
+			plain, err := item.aead.Open(nil, sealed[:item.aead.NonceSize()], sealed[item.aead.NonceSize():], nil)
+			if err == nil {
+				return string(plain), true, nil
+			}
+		}
+		return "", false, errors.New("legacy credential decryption failed")
 	}
-	if len(sealed) < aead.NonceSize() {
-		return "", errors.New("encrypted credential is malformed")
-	}
-	plain, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], nil)
-	if err != nil {
-		return "", errors.New("credential decryption failed")
-	}
-	return string(plain), nil
+	return value, true, nil
 }
 
 func randomID() (string, error) {

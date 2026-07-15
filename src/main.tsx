@@ -19,6 +19,8 @@ const gonvex = new GonvexClient(withGonvexProject(gonvexBaseURL, gonvexProjectID
   project: gonvexProjectID,
   token: devJWT(),
   tenant: gonvexProjectID,
+  queryCache: false,
+  errorReporting: false,
 });
 
 createRoot(document.getElementById("root")!).render(

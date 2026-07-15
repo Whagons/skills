@@ -1,8 +1,11 @@
 minimumReleaseAgeExclude:
-  - "@gonvex/cli@0.1.8"
-  - "@gonvex/client@0.1.8"
-  - "@gonvex/protocol@0.1.8"
-  - "@gonvex/react@0.1.8"
+  - "@gonvex/cli@0.1.10"
+  - "@gonvex/client@0.1.10"
+  - "@gonvex/protocol@0.1.10"
+  - "@gonvex/react@0.1.10"
 
 onlyBuiltDependencies:
   - "@swc/core"
+
+patchedDependencies:
+  '@gonvex/cli@0.1.10': patches/@gonvex__cli@0.1.10.patch

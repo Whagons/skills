@@ -1508,7 +1508,7 @@ button {
 
 .apiKeyCreateForm {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(220px, 1fr);
   align-items: end;
   gap: 10px;
   border: 1px solid #e1ddd3;
@@ -1531,6 +1531,53 @@ button {
 
 .apiKeyCreateForm .ui-input {
   background: #fffdf8;
+}
+
+.apiKeyCreateForm > .ui-button {
+  justify-self: start;
+}
+
+.apiKeyCreateForm select {
+  min-height: 38px;
+  border: 1px solid #d8d4ca;
+  border-radius: 8px;
+  background: #fffdf8;
+  color: #31332d;
+  padding: 0 34px 0 11px;
+  font: inherit;
+}
+
+.scopeFieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #dfdbd0;
+  border-radius: 9px;
+  padding: 10px 12px 12px;
+}
+
+.scopeFieldset legend {
+  padding: 0 5px;
+  color: #62645d;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+}
+
+.scopeFieldset label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #62645d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.scopeFieldset input {
+  accent-color: #7f9f24;
 }
 
 .freshKey {
@@ -1866,6 +1913,13 @@ html[data-theme="dark"] .keyRow {
 
 html[data-theme="dark"] .apiKeyCreateForm .ui-input {
   background: #171812;
+}
+
+html[data-theme="dark"] .apiKeyCreateForm select,
+html[data-theme="dark"] .scopeFieldset {
+  border-color: #404238;
+  background: #171812;
+  color: #e5e7de;
 }
 
 html[data-theme="dark"] .keyRow:hover {

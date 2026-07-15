@@ -5,6 +5,8 @@ export const api = {
     apiKeys: {
       list: { kind: "query", path: "agent.apiKeys.list" },
       revoke: { kind: "mutation", path: "agent.apiKeys.revoke" },
+      revokeSelf: { kind: "mutation", path: "agent.apiKeys.revokeSelf" },
+      verify: { kind: "query", path: "agent.apiKeys.verify" },
     },
     credentials: {
       delete: { kind: "mutation", path: "agent.credentials.delete" },
@@ -28,6 +30,8 @@ export const api = {
     login: { kind: "mutation", path: "auth.login" },
     logout: { kind: "mutation", path: "auth.logout" },
     me: { kind: "query", path: "auth.me" },
+    switchWorkspace: { kind: "mutation", path: "auth.switchWorkspace" },
+    workspaces: { kind: "query", path: "auth.workspaces" },
   },
   credentials: {
     delete: { kind: "mutation", path: "credentials.delete" },
@@ -36,12 +40,18 @@ export const api = {
     save: { kind: "mutation", path: "credentials.save" },
   },
   skills: {
+    approve: { kind: "mutation", path: "skills.approve" },
     delete: { kind: "mutation", path: "skills.delete" },
     get: { kind: "query", path: "skills.get" },
     list: { kind: "query", path: "skills.list" },
     save: { kind: "mutation", path: "skills.save" },
   },
   team: {
+    invitations: {
+      accept: { kind: "mutation", path: "team.invitations.accept" },
+      list: { kind: "query", path: "team.invitations.list" },
+      reject: { kind: "mutation", path: "team.invitations.reject" },
+    },
     invite: { kind: "mutation", path: "team.invite" },
     list: { kind: "query", path: "team.list" },
     remove: { kind: "mutation", path: "team.remove" },

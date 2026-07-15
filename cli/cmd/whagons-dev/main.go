@@ -27,9 +27,11 @@ import (
 )
 
 const (
-	defaultWSURL   = "wss://gonvex.whagons.com/ws"
-	defaultProject = "skills"
-	defaultAppURL  = "https://skills.whagons.com/"
+	defaultWSURL            = "wss://gonvex.whagons.com/ws"
+	defaultProject          = "skills"
+	defaultAppURL           = "https://skills.whagons.com/"
+	maxSkillBytes           = 2 << 20
+	maxCredentialInputBytes = 256 << 10
 )
 
 type Config struct {
@@ -71,6 +73,14 @@ type Credential struct {
 
 type DeleteResult struct {
 	Deleted bool `json:"deleted"`
+}
+
+type credentialExecOptions struct {
+	Name       string
+	Command    []string
+	Prefix     string
+	Via        string
+	InheritEnv []string
 }
 
 type message map[string]any
@@ -129,7 +139,7 @@ Usage:
   whagons-dev auth login [--app-url URL]
   whagons-dev auth set-key --stdin        (pipe a key minted in the vault UI)
   whagons-dev auth status
-  whagons-dev auth logout
+	  whagons-dev auth logout [--local-only]
   whagons-dev skills list
   whagons-dev skills get <name-or-id> [--output FILE]
   whagons-dev skills copy <name-or-id>
@@ -143,7 +153,8 @@ Usage:
   whagons-dev credentials list
   whagons-dev credentials set <name> [--summary TEXT] [--value-stdin]
   whagons-dev credentials delete <id>
-  whagons-dev credentials exec <name> [--prefix PREFIX] -- <command> [args...]
+	  whagons-dev credentials exec <name> [--via file|stdin|env] [--prefix PREFIX]
+	      [--inherit-env NAME[,NAME...]] -- <command> [args...]
 
 What it does:
   - Authenticates itself by opening the Skills Vault in your browser (automatic on first use).
@@ -151,7 +162,8 @@ What it does:
   - Installs or updates cloud skills into Codex-compatible SKILL.md folders.
   - Stores project credentials and injects them into child processes without printing them.
 
-Secrets are not printed by default. Use credentials exec to inject them into a child process.
+	Secrets are not printed by default. Credential files are mode 0600 and deleted after the child exits.
+	Child processes receive a minimal environment; opt in to additional non-secret variables with --inherit-env.
 `)
 }
 
@@ -190,7 +202,7 @@ func runAuth(command string, args []string) error {
 		if !*valueStdin {
 			return errors.New(`use --stdin so the key stays out of shell history: printf '%s' "$KEY" | whagons-dev auth set-key --stdin`)
 		}
-		data, err := io.ReadAll(os.Stdin)
+		data, err := readLimitedInput(os.Stdin, 4096, "API key")
 		if err != nil {
 			return err
 		}
@@ -206,8 +218,8 @@ func runAuth(command string, args []string) error {
 			return err
 		}
 		defer client.Close()
-		var keys []APIKeyRecord
-		if err := client.Query("agent.apiKeys.list", map[string]any{"apiKey": apiKey}, &keys); err != nil {
+		var verified DeleteResult
+		if err := client.Query("agent.apiKeys.verify", map[string]any{"apiKey": apiKey}, &verified); err != nil {
 			return fmt.Errorf("the vault rejected this API key: %v", err)
 		}
 		config.APIKey = apiKey
@@ -220,10 +232,34 @@ func runAuth(command string, args []string) error {
 		fmt.Println("API key verified and saved to " + configPath())
 		return nil
 	case "logout":
+		fs := flag.NewFlagSet("auth logout", flag.ContinueOnError)
+		localOnly := fs.Bool("local-only", false, "clear local authentication without revoking the server key")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		config, _ := readConfig()
+		apiKey := firstNonEmpty(envValue("API_KEY"), config.APIKey)
+		if !*localOnly && apiKey != "" {
+			wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
+			project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
+			client, err := NewClient(wsURLWithProject(wsURL, project), project)
+			if err != nil {
+				return fmt.Errorf("could not revoke the server key; local authentication was preserved: %w (use --local-only to clear it anyway)", err)
+			}
+			defer client.Close()
+			var result DeleteResult
+			if err := client.Mutation("agent.apiKeys.revokeSelf", map[string]any{"apiKey": apiKey}, &result); err != nil {
+				return fmt.Errorf("could not revoke the server key; local authentication was preserved: %w (use --local-only to clear it anyway)", err)
+			}
+		}
 		if err := writeConfig(Config{}); err != nil {
 			return err
 		}
-		fmt.Println("Logged out.")
+		if *localOnly {
+			fmt.Println("Local authentication cleared; the server key was not revoked.")
+		} else {
+			fmt.Println("Logged out and revoked the server key.")
+		}
 		return nil
 	default:
 		usage()
@@ -405,7 +441,7 @@ func runCredentials(client *Client, apiKey, command string, args []string) error
 		if !*valueStdin {
 			return errors.New("use --value-stdin so secret values are not exposed in shell history")
 		}
-		value, err := io.ReadAll(os.Stdin)
+		value, err := readLimitedInput(os.Stdin, maxCredentialInputBytes, "credential")
 		if err != nil {
 			return err
 		}
@@ -419,7 +455,7 @@ func runCredentials(client *Client, apiKey, command string, args []string) error
 			"id":      credentialID,
 			"name":    fs.Arg(0),
 			"summary": *summary,
-			"value":   strings.TrimSpace(string(value)),
+			"value":   string(value),
 		}, &meta); err != nil {
 			return err
 		}
@@ -440,20 +476,39 @@ func runCredentials(client *Client, apiKey, command string, args []string) error
 		}
 		return nil
 	case "exec":
-		name, commandArgs, prefix, err := parseCredentialExec(args)
+		options, err := parseCredentialExec(args)
 		if err != nil {
 			return err
 		}
 		var credential Credential
-		if err := client.Query("agent.credentials.get", map[string]any{"apiKey": apiKey, "name": name}, &credential); err != nil {
+		if err := client.Query("agent.credentials.get", map[string]any{"apiKey": apiKey, "name": options.Name}, &credential); err != nil {
 			return err
 		}
-		env := credentialEnv(credential.Name, credential.Value, prefix)
-		cmd := exec.Command(commandArgs[0], commandArgs[1:]...)
+		childEnv, err := childEnvironment(options.InheritEnv)
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command(options.Command[0], options.Command[1:]...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
-		cmd.Env = append(os.Environ(), env...)
+		cmd.Env = childEnv
+		switch options.Via {
+		case "file":
+			path, cleanup, err := writeCredentialFile(credential.Value)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			prefix := sanitizeEnv(firstNonEmpty(options.Prefix, credential.Name))
+			cmd.Env = append(cmd.Env, "WHAGONS_CREDENTIAL_FILE="+path, prefix+"_FILE="+path)
+		case "stdin":
+			cmd.Stdin = strings.NewReader(credential.Value)
+		case "env":
+			cmd.Env = append(cmd.Env, credentialEnv(credential.Name, credential.Value, options.Prefix)...)
+		default:
+			return fmt.Errorf("unsupported credential delivery mode %q", options.Via)
+		}
 		return cmd.Run()
 	default:
 		usage()
@@ -576,10 +631,16 @@ func (c *Client) Mutation(path string, args any, out any) error {
 }
 
 func (c *Client) write(value any) error {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return err
+	}
 	return c.conn.WriteJSON(value)
 }
 
 func (c *Client) read() (message, error) {
+	if err := c.conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return nil, err
+	}
 	var msg message
 	if err := c.conn.ReadJSON(&msg); err != nil {
 		return nil, err
@@ -599,51 +660,74 @@ func decodeResult(value any, out any) error {
 }
 
 type authCallbackPayload struct {
-	APIKey  string `json:"api_key"`
-	State   string `json:"state"`
-	Project string `json:"project"`
-	WSURL   string `json:"ws_url"`
-	AppURL  string `json:"app_url"`
+	APIKey string `json:"api_key"`
+	State  string `json:"state"`
 }
 
 func browserLogin(appURL string) error {
 	config, _ := readConfig()
 	appURL = firstNonEmpty(appURL, envValue("APP_URL"), config.AppURL, defaultAppURL)
-	state := randomID()
+	trustedAppURL, trustedOrigin, err := validateAppURL(appURL)
+	if err != nil {
+		return err
+	}
+	wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
+	if err := validateWebSocketURL(wsURL); err != nil {
+		return err
+	}
+	project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
+	state, err := secureRandomID()
+	if err != nil {
+		return fmt.Errorf("generate authorization state: %w", err)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 	resultCh := make(chan Config, 1)
-	server := &http.Server{}
+	server := &http.Server{
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       15 * time.Second,
+	}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The vault page POSTs the key cross-origin from https, so the
-		// loopback server must answer the CORS preflight.
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Access-Control-Allow-Origin", trustedOrigin)
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		if r.URL.Path != "/callback" {
 			http.NotFound(w, r)
 			return
 		}
+		if r.Header.Get("Origin") != trustedOrigin {
+			http.Error(w, "origin mismatch", http.StatusForbidden)
+			return
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		payload := authCallbackPayload{
-			APIKey:  r.URL.Query().Get("api_key"),
-			State:   r.URL.Query().Get("state"),
-			Project: r.URL.Query().Get("project"),
-			WSURL:   r.URL.Query().Get("ws_url"),
-			AppURL:  r.URL.Query().Get("app_url"),
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST, OPTIONS")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
-		if r.Method == http.MethodPost {
-			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
-				http.Error(w, "invalid payload", http.StatusBadRequest)
-				return
-			}
+		if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+			http.Error(w, "content type must be application/json", http.StatusUnsupportedMediaType)
+			return
+		}
+		var payload authCallbackPayload
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&payload); err != nil {
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
 		}
 		// A wrong state or missing key is a stray request, not the vault;
 		// reject it and keep waiting for the real callback.
@@ -660,18 +744,21 @@ func browserLogin(appURL string) error {
 <body style="font-family:system-ui;background:#0b1117;color:#f7fffb;display:grid;place-items:center;height:100vh;margin:0">
 <div style="text-align:center"><h1 style="margin:0 0 8px">whagons-dev is authorized</h1>
 <p style="color:#9db3aa;margin:0">You can close this tab and return to your terminal.</p></div></body>`)
-		resultCh <- Config{
+		select {
+		case resultCh <- Config{
 			APIKey:  payload.APIKey,
-			AppURL:  firstNonEmpty(payload.AppURL, appURL),
-			WSURL:   firstNonEmpty(payload.WSURL, defaultWSURL),
-			Project: firstNonEmpty(payload.Project, defaultProject),
+			AppURL:  trustedAppURL,
+			WSURL:   wsURL,
+			Project: project,
+		}:
+		default:
 		}
 	})
 	go func() {
 		_ = server.Serve(listener)
 	}()
 	callback := "http://" + listener.Addr().String() + "/callback"
-	loginURL, err := url.Parse(appURL)
+	loginURL, err := url.Parse(trustedAppURL)
 	if err != nil {
 		return err
 	}
@@ -687,24 +774,34 @@ func browserLogin(appURL string) error {
 	}
 	select {
 	case result := <-resultCh:
-		_ = server.Shutdown(context.Background())
+		shutdownHTTPServer(server)
+		client, err := NewClient(wsURLWithProject(result.WSURL, result.Project), result.Project)
+		if err != nil {
+			return fmt.Errorf("verify authorized key: %w", err)
+		}
+		var verified DeleteResult
+		err = client.Query("agent.apiKeys.verify", map[string]any{"apiKey": result.APIKey}, &verified)
+		client.Close()
+		if err != nil {
+			return fmt.Errorf("the vault rejected the authorized key: %w", err)
+		}
 		if err := writeConfig(result); err != nil {
 			return err
 		}
 		fmt.Println("Logged in. API key saved to " + configPath())
 		return nil
 	case <-time.After(5 * time.Minute):
-		_ = server.Shutdown(context.Background())
+		shutdownHTTPServer(server)
 		return errors.New("timed out waiting for browser authorization")
 	}
 }
 
 func readConfig() (Config, error) {
-	data, err := os.ReadFile(configPath())
+	data, err := readPrivateFile(configPath(), 1<<20)
 	if err != nil {
 		// Fall back to the config written by the old whagons-skills CLI so an
 		// upgrade does not force a re-login.
-		legacy, legacyErr := os.ReadFile(legacyConfigPath())
+		legacy, legacyErr := readPrivateFile(legacyConfigPath(), 1<<20)
 		if legacyErr != nil {
 			return Config{}, err
 		}
@@ -716,15 +813,76 @@ func readConfig() (Config, error) {
 
 func writeConfig(config Config) error {
 	path := configPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	_, statErr := os.Stat(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	if os.IsNotExist(statErr) || filepath.Base(dir) == ".whagons-dev" {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
 	}
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o600)
+	return writePrivateFile(path, data)
+}
+
+func readPrivateFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing non-regular private file: %s", path)
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("private file is too large: %s", path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, fmt.Errorf("secure private file permissions: %w", err)
+		}
+	}
+	return readRegularFile(path, maxBytes)
+}
+
+func writePrivateFile(path string, data []byte) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular private file: %s", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".config-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func configPath() string {
@@ -757,6 +915,43 @@ func wsURLWithProject(rawURL, project string) string {
 	return u.String()
 }
 
+func validateAppURL(rawURL string) (string, string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || u.User != nil {
+		return "", "", errors.New("vault app URL must be an absolute URL without user information")
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return "", "", errors.New("vault app URL must use HTTPS (HTTP is allowed only for loopback development)")
+	}
+	u.Fragment = ""
+	return u.String(), u.Scheme + "://" + u.Host, nil
+}
+
+func validateWebSocketURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" || u.User != nil {
+		return errors.New("vault WebSocket URL must be an absolute URL without user information")
+	}
+	if u.Scheme != "wss" && !(u.Scheme == "ws" && isLoopbackHost(u.Hostname())) {
+		return errors.New("vault WebSocket URL must use WSS (WS is allowed only for loopback development)")
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func shutdownHTTPServer(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = server.Shutdown(ctx)
+}
+
 // findSkill resolves a name or id to the full skill, including content.
 // agent.skills.get matches on either id or (case-insensitive) name, so the
 // same value is passed as both.
@@ -769,8 +964,94 @@ func findSkill(client *Client, apiKey, nameOrID string) (Skill, error) {
 	return skill, nil
 }
 
+func readRegularFile(path string, maxBytes int64) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing non-regular file: %s", path)
+	}
+	if before.Size() > maxBytes {
+		return nil, fmt.Errorf("file exceeds %d-byte limit: %s", maxBytes, path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	after, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, fmt.Errorf("file changed while opening: %s", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds %d-byte limit: %s", maxBytes, path)
+	}
+	return data, nil
+}
+
+func readLimitedInput(reader io.Reader, maxBytes int64, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s input exceeds the %d-byte limit", label, maxBytes)
+	}
+	return data, nil
+}
+
+func ensureSafeDirectory(path string, mode os.FileMode) error {
+	info, err := os.Lstat(path)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("refusing non-directory path: %s", path)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	return os.MkdirAll(path, mode)
+}
+
+func writeRegularFile(path string, data []byte, mode os.FileMode) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular output file: %s", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".skill-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(mode); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
 func uploadSkill(client *Client, apiKey, path, id, name, summary string) (Skill, error) {
-	contentBytes, err := os.ReadFile(path)
+	contentBytes, err := readRegularFile(path, maxSkillBytes)
 	if err != nil {
 		return Skill{}, err
 	}
@@ -807,7 +1088,20 @@ func discoverSkillFiles(root string) ([]string, error) {
 		if entry.IsDir() && (strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules") && path != root {
 			return filepath.SkipDir
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.Name() == "SKILL.md" {
+				return fmt.Errorf("refusing symlinked skill file: %s", path)
+			}
+			return nil
+		}
 		if !entry.IsDir() && entry.Name() == "SKILL.md" {
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			if !info.Mode().IsRegular() || info.Size() > maxSkillBytes {
+				return fmt.Errorf("skill file must be regular and at most %d bytes: %s", maxSkillBytes, path)
+			}
 			files = append(files, path)
 		}
 		return nil
@@ -824,7 +1118,7 @@ func installCodexSkills(client *Client, apiKey string, dir string) error {
 	if err := client.Query("agent.skills.list", map[string]any{"apiKey": apiKey}, &skills); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := ensureSafeDirectory(dir, 0o755); err != nil {
 		return err
 	}
 	for _, meta := range skills {
@@ -837,12 +1131,15 @@ func installCodexSkills(client *Client, apiKey string, dir string) error {
 		if name == "" {
 			name = safePathName(skill.ID)
 		}
+		if len(skill.Content) > maxSkillBytes {
+			return fmt.Errorf("refusing oversized skill %s (%d bytes)", skill.Name, len(skill.Content))
+		}
 		skillDir := filepath.Join(dir, name)
-		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		if err := ensureSafeDirectory(skillDir, 0o755); err != nil {
 			return err
 		}
 		path := filepath.Join(skillDir, "SKILL.md")
-		if err := os.WriteFile(path, []byte(skill.Content), 0o644); err != nil {
+		if err := writeRegularFile(path, []byte(skill.Content), 0o644); err != nil {
 			return err
 		}
 		fmt.Printf("Installed %s -> %s\n", skill.Name, path)
@@ -910,28 +1207,53 @@ func copyToClipboard(value string) error {
 	return cmd.Run()
 }
 
-func parseCredentialExec(args []string) (string, []string, string, error) {
+func parseCredentialExec(args []string) (credentialExecOptions, error) {
+	var options credentialExecOptions
 	if len(args) == 0 {
-		return "", nil, "", errors.New("usage: whagons-skills credentials exec <name> [--prefix PREFIX] -- <command> [args...]")
+		return options, errors.New("usage: whagons-dev credentials exec <name> [--via file|stdin|env] [--prefix PREFIX] [--inherit-env NAME[,NAME...]] -- <command> [args...]")
 	}
-	name := args[0]
-	prefix := ""
+	options.Name = args[0]
+	options.Via = "file"
 	sep := -1
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--" {
 			sep = i
 			break
 		}
-		if args[i] == "--prefix" && i+1 < len(args) {
-			prefix = args[i+1]
+		switch args[i] {
+		case "--prefix", "--via", "--inherit-env":
+			if i+1 >= len(args) {
+				return options, fmt.Errorf("%s requires a value", args[i])
+			}
+			value := args[i+1]
+			switch args[i] {
+			case "--prefix":
+				options.Prefix = value
+			case "--via":
+				options.Via = strings.ToLower(value)
+			case "--inherit-env":
+				for _, name := range strings.Split(value, ",") {
+					if name = strings.TrimSpace(name); name != "" {
+						options.InheritEnv = append(options.InheritEnv, name)
+					}
+				}
+			}
 			i++
-			continue
+		default:
+			return options, fmt.Errorf("unknown credentials exec option: %s", args[i])
 		}
 	}
 	if sep == -1 || sep+1 >= len(args) {
-		return "", nil, "", errors.New("usage: whagons-skills credentials exec <name> [--prefix PREFIX] -- <command> [args...]")
+		return options, errors.New("usage: whagons-dev credentials exec <name> [--via file|stdin|env] [--prefix PREFIX] [--inherit-env NAME[,NAME...]] -- <command> [args...]")
 	}
-	return name, args[sep+1:], prefix, nil
+	if options.Name == "" {
+		return options, errors.New("credential name is required")
+	}
+	if options.Via != "file" && options.Via != "stdin" && options.Via != "env" {
+		return options, errors.New("--via must be one of file, stdin, or env")
+	}
+	options.Command = args[sep+1:]
+	return options, nil
 }
 
 func credentialEnv(name, value, explicitPrefix string) []string {
@@ -947,6 +1269,71 @@ func credentialEnv(name, value, explicitPrefix string) []string {
 	}
 	env[prefix+"_VALUE"] = value
 	return envPairs(env)
+}
+
+var safeInheritedEnvironment = map[string]bool{
+	"COMSPEC": true, "HOME": true, "LANG": true, "LOGNAME": true,
+	"PATH": true, "PATHEXT": true, "SHELL": true, "SYSTEMROOT": true,
+	"TEMP": true, "TERM": true, "TMP": true, "TMPDIR": true,
+	"USER": true, "WINDIR": true,
+}
+
+var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var sensitiveEnvironmentName = regexp.MustCompile(`(?i)(API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|AUTH)`)
+
+func childEnvironment(explicit []string) ([]string, error) {
+	wanted := make(map[string]bool, len(safeInheritedEnvironment)+len(explicit))
+	for name := range safeInheritedEnvironment {
+		wanted[name] = true
+	}
+	for _, name := range explicit {
+		if !environmentName.MatchString(name) {
+			return nil, fmt.Errorf("invalid environment variable name %q", name)
+		}
+		if sensitiveEnvironmentName.MatchString(name) {
+			return nil, fmt.Errorf("refusing to inherit sensitive environment variable %s; pass required secrets through a separate credential", name)
+		}
+		wanted[strings.ToUpper(name)] = true
+	}
+
+	env := make(map[string]string)
+	for _, pair := range os.Environ() {
+		name, value, found := strings.Cut(pair, "=")
+		if !found {
+			continue
+		}
+		upper := strings.ToUpper(name)
+		if wanted[upper] || strings.HasPrefix(upper, "LC_") {
+			env[name] = value
+		}
+	}
+	return envPairs(env), nil
+}
+
+func writeCredentialFile(value string) (string, func(), error) {
+	file, err := os.CreateTemp("", "whagons-credential-*")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = os.Remove(path)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if _, err := io.WriteString(file, value); err != nil {
+		file.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
 }
 
 func flattenEnv(env map[string]string, prefix, path string, value any) {
@@ -1012,11 +1399,19 @@ func devJWT() string {
 }
 
 func randomID() string {
+	id, err := secureRandomID()
+	if err == nil {
+		return id
+	}
+	return fmt.Sprintf("id_%d", time.Now().UnixNano())
+}
+
+func secureRandomID() (string, error) {
 	var buf [18]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Sprintf("id_%d", time.Now().UnixNano())
+		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(buf[:])
+	return base64.RawURLEncoding.EncodeToString(buf[:]), nil
 }
 
 func firstNonEmpty(values ...string) string {

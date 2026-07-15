@@ -42,6 +42,7 @@ type SkillMeta = {
   summary: string;
   created_at: string;
   updated_at: string;
+  approved: boolean;
 };
 
 type Skill = SkillMeta & {
@@ -54,6 +55,8 @@ type APIKeyRecord = {
   prefix: string;
   created_at: string;
   revoked_at?: string | null;
+  expires_at: string;
+  scopes: string[];
 };
 
 type CreateAPIKeyResult = {
@@ -64,6 +67,7 @@ type CreateAPIKeyResult = {
 type LoginResult = {
   sessionToken: string;
   expires_at: string;
+  pending_only: boolean;
 };
 
 type CredentialMeta = {
@@ -72,10 +76,6 @@ type CredentialMeta = {
   summary: string;
   created_at: string;
   updated_at: string;
-};
-
-type Credential = CredentialMeta & {
-  value: string;
 };
 
 type CredentialDraft = {
@@ -95,6 +95,7 @@ type MeResult = {
   name: string;
   is_owner: boolean;
   workspace_email: string;
+  pending_only: boolean;
 };
 
 type TeamMember = {
@@ -103,11 +104,28 @@ type TeamMember = {
   created_at: string;
 };
 
+type WorkspaceInvitation = {
+  id: string;
+  workspace_id: string;
+  workspace_email: string;
+  email: string;
+  created_at: string;
+};
+
+type WorkspaceRecord = {
+  id: string;
+  email: string;
+  is_owner: boolean;
+  active: boolean;
+};
+
 type VaultTab = "skills" | "apiKeys" | "credentials" | "team";
 type ColorTheme = "light" | "dark";
 
 const sessionStorageKey = "whagons-skills-vault-session";
 const themeStorageKey = "whagons-skills-vault-theme";
+const readOnlyScopes = ["skills:read"];
+const cliScopes = ["skills:read", "skills:write", "credentials:read", "credentials:write", "keys:read", "keys:revoke"];
 
 type StoredSession = {
   sessionToken: string;
@@ -184,19 +202,23 @@ function shareURL(skill: SkillMeta) {
   return `${window.location.origin}${window.location.pathname}#${encodeURIComponent(skill.id)}`;
 }
 
+function shellQuote(value: string) {
+  return "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
 function parseLoopbackCallback(rawCallback: string): URL | null {
   try {
     const url = new URL(rawCallback);
-    const loopbackHosts = ["127.0.0.1", "localhost", "[::1]"];
+    const loopbackHosts = ["127.0.0.1", "[::1]"];
     if (url.protocol !== "http:" || !loopbackHosts.includes(url.hostname)) return null;
+    if (!url.port || url.pathname !== "/callback" || url.username || url.password || url.search || url.hash) return null;
     return url;
   } catch {
     return null;
   }
 }
 
-function agentExample(apiKey: string) {
-  const key = apiKey || "skv_your_key_here";
+function agentExample() {
   return `import { GonvexClient } from "@gonvex/client";
 
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -210,7 +232,8 @@ const client = new GonvexClient("wss://gonvex.whagons.com/ws?project=skills", {
   tenant: "skills",
 });
 
-const apiKey = "${key}";
+const apiKey = process.env.WHAGONS_DEV_API_KEY;
+if (!apiKey) throw new Error("WHAGONS_DEV_API_KEY is required");
 
 const skills = await client.query(
   { kind: "query", path: "agent.skills.list" },
@@ -246,13 +269,7 @@ const credential = await client.query(
 client.close();`;
 }
 
-function agentSetupInstructions(apiKey: string) {
-  const keyLine = apiKey
-    ? `An API key for this workspace is included below. Save it into the CLI once (headless-friendly,
-skips the browser):
-   printf '%s' '${apiKey}' | whagons-dev auth set-key --stdin
-Or export WHAGONS_DEV_API_KEY=${apiKey} for ephemeral use. Then delete this handoff text.`
-    : "No API key pasted here — the CLI will open the browser to authorize itself on first use.";
+function agentSetupInstructions() {
   return `Whagons Skills Vault — agent setup (plug and play)
 
 Goal: give this agent the Whagons team's skills and project credentials with two commands.
@@ -264,14 +281,16 @@ Goal: give this agent the Whagons team's skills and project credentials with two
    browser on first run, you click "Authorize CLI", and it saves its own API key):
    whagons-dev skills install-codex
 
-${keyLine}
+The copied setup never includes a live key. The CLI opens the browser for an explicit,
+scoped authorization. If a key was created manually, copy it separately and provide it
+to \`whagons-dev auth set-key --stdin\` through a secure channel.
 
 That's it. From then on:
 - Refresh skills any time: whagons-dev skills update-codex
 - See what credentials exist: whagons-dev credentials list
 - Run anything that needs a secret WITHOUT printing it:
   whagons-dev credentials exec coolify-whagons -- <command> [args...]
-  (the credential is injected as environment variables, e.g. COOLIFY_WHAGONS_JSON)
+  (the credential is provided through a temporary mode-0600 file by default)
 
 Context:
 - The vault at https://skills.whagons.com stores Whagons-specific agent skills and
@@ -292,7 +311,7 @@ Direct Gonvex API path for custom scripts:
 1. npm install @gonvex/client
 2. Runtime: ${gonvexWSURL}  ·  project/tenant: ${gonvexProjectID}
 3. Call agent endpoints with the API key:
-${agentExample(apiKey)}
+${agentExample()}
 
 Security rules:
 - Use credentials exec for commands that need secrets.
@@ -325,27 +344,35 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [freshAPIKey, setFreshAPIKey] = useState("");
   const [apiKeyName, setAPIKeyName] = useState("");
+  const [apiKeyScopes, setAPIKeyScopes] = useState<string[]>(readOnlyScopes);
+  const [apiKeyExpiryDays, setAPIKeyExpiryDays] = useState(30);
   const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>({ name: "", summary: "", value: "" });
   const [inviteEmail, setInviteEmail] = useState("");
 
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
-  const skills = useQuery<SkillMeta[]>(api.skills.list, protectedArgs) ?? [];
-  const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, protectedArgs) ?? [];
-  const credentials = useQuery<CredentialMeta[]>(api.credentials.list, protectedArgs) ?? [];
   const me = useQuery<MeResult>(api.auth.me, protectedArgs) ?? null;
-  const teamMembers = useQuery<TeamMember[]>(api.team.list, protectedArgs) ?? [];
+  const activeWorkspaceArgs = sessionToken && me && !me.pending_only ? { sessionToken } : "skip";
+  const skills = useQuery<SkillMeta[]>(api.skills.list, activeWorkspaceArgs) ?? [];
+  const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, activeWorkspaceArgs) ?? [];
+  const credentials = useQuery<CredentialMeta[]>(api.credentials.list, activeWorkspaceArgs) ?? [];
+  const teamMembers = useQuery<TeamMember[]>(api.team.list, activeWorkspaceArgs) ?? [];
+  const invitations = useQuery<WorkspaceInvitation[]>(api.team.invitations.list, protectedArgs) ?? [];
+  const workspaces = useQuery<WorkspaceRecord[]>(api.auth.workspaces, protectedArgs) ?? [];
   const login = useMutation(api.auth.login);
   const logout = useMutation(api.auth.logout);
+  const switchWorkspace = useMutation(api.auth.switchWorkspace);
   const deleteSkill = useMutation(api.skills.delete);
+  const approveSkill = useMutation(api.skills.approve);
   const createAPIKey = useMutation(api.apiKeys.create);
   const revokeAPIKey = useMutation(api.apiKeys.revoke);
-  const getCredential = useMutation(api.credentials.get);
   const saveCredential = useMutation(api.credentials.save);
   const deleteCredential = useMutation(api.credentials.delete);
   const inviteMember = useMutation(api.team.invite);
   const removeMember = useMutation(api.team.remove);
+  const acceptInvitation = useMutation(api.team.invitations.accept);
+  const rejectInvitation = useMutation(api.team.invitations.reject);
   const isWorkspaceOwner = me?.is_owner ?? true;
-  const cliCallbackURL = cliAuthRequest ? parseLoopbackCallback(cliAuthRequest.callback) : null;
+  const cliCallbackURL = cliAuthRequest?.state ? parseLoopbackCallback(cliAuthRequest.callback) : null;
 
   const filteredSkills = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -358,10 +385,10 @@ export default function App() {
   const selectedSkill = skills.find((skill) => skill.id === selectedID) ?? filteredSkills[0] ?? skills[0] ?? null;
   const selectedSkillFull = useQuery<Skill>(
     api.skills.get,
-    sessionToken && selectedSkill ? { sessionToken, id: selectedSkill.id } : "skip",
+    sessionToken && me && !me.pending_only && selectedSkill ? { sessionToken, id: selectedSkill.id } : "skip",
   ) ?? null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
-  const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at);
+  const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && new Date(key.expires_at).getTime() > Date.now());
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -400,6 +427,12 @@ export default function App() {
     const timeout = window.setTimeout(() => setNotice(""), 2600);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    if (!freshAPIKey) return;
+    const timeout = window.setTimeout(() => setFreshAPIKey(""), 60_000);
+    return () => window.clearTimeout(timeout);
+  }, [freshAPIKey]);
 
   useEffect(() => {
     if (sessionToken || !googleClientID || !googleButtonRef.current) return;
@@ -482,13 +515,6 @@ export default function App() {
     setNotice(label);
   }
 
-  async function copyCredential(credential: CredentialMeta) {
-    await runGuarded(async () => {
-      const result = await getCredential({ sessionToken, id: credential.id, name: credential.name }) as Credential;
-      await copyText(result.value, `Copied ${credential.name}`);
-    });
-  }
-
   async function removeSkill(skill: SkillMeta) {
     await runGuarded(async () => {
       await deleteSkill({ sessionToken, id: skill.id });
@@ -501,11 +527,15 @@ export default function App() {
     const name = apiKeyName.trim();
     if (!name) return;
     await runGuarded(async () => {
-      const result = await createAPIKey({ sessionToken, name }) as CreateAPIKeyResult;
+      const result = await createAPIKey({ sessionToken, name, scopes: apiKeyScopes, expires_in_days: apiKeyExpiryDays }) as CreateAPIKeyResult;
       setFreshAPIKey(result.apiKey);
       setAPIKeyName("");
       setNotice(`Created ${result.record.name}`);
     });
+  }
+
+  function toggleAPIKeyScope(scope: string) {
+    setAPIKeyScopes((current) => current.includes(scope) ? current.filter((item) => item !== scope) : [...current, scope]);
   }
 
   async function authorizeCLI() {
@@ -516,14 +546,15 @@ export default function App() {
   }
 
   async function deliverCLIKey(request: CLIAuthRequest, callbackURL: URL) {
-    const result = await createAPIKey({ sessionToken, name: `${request.name} ${new Date().toLocaleString()}` }) as CreateAPIKeyResult;
+    const result = await createAPIKey({
+      sessionToken,
+      name: `${request.name} ${new Date().toLocaleString()}`,
+      scopes: cliScopes,
+      expires_in_days: 30,
+    }) as CreateAPIKeyResult;
     const payload = {
       api_key: result.apiKey,
-      api_key_prefix: result.record.prefix,
       state: request.state,
-      project: gonvexProjectID,
-      ws_url: gonvexWSURL,
-      app_url: window.location.origin + window.location.pathname,
     };
     try {
       // POST keeps the API key out of browser history. The CLI's loopback
@@ -532,18 +563,17 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
       });
       if (!response.ok) throw new Error(`callback returned ${response.status}`);
       setCliAuthRequest(null);
       window.history.replaceState(null, "", window.location.pathname + window.location.hash);
       setNotice("CLI authorized — return to your terminal");
-    } catch {
-      // Older CLI builds only handle the GET redirect.
-      const callback = new URL(callbackURL.toString());
-      for (const [key, value] of Object.entries(payload)) {
-        callback.searchParams.set(key, value);
-      }
-      window.location.href = callback.toString();
+    } catch (error) {
+      await revokeAPIKey({ sessionToken, id: result.record.id }).catch(() => undefined);
+      throw new Error(`Could not deliver the CLI key; it was revoked. ${error instanceof Error ? error.message : ""}`.trim());
     }
   }
 
@@ -554,6 +584,7 @@ export default function App() {
       // Session may already be expired; clear it locally regardless.
     }
     sessionStorage.removeItem(sessionStorageKey);
+    setFreshAPIKey("");
     setSessionToken("");
   }
 
@@ -581,6 +612,30 @@ export default function App() {
       await saveCredential({ sessionToken, ...credentialDraft });
       setCredentialDraft({ name: "", summary: "", value: "" });
       setNotice("Stored credential");
+    });
+  }
+
+  async function respondToInvitation(invitation: WorkspaceInvitation, accept: boolean) {
+    await runGuarded(async () => {
+      if (accept) {
+        await acceptInvitation({ sessionToken, id: invitation.id });
+        window.location.reload();
+        return;
+      }
+      await rejectInvitation({ sessionToken, id: invitation.id });
+      if (me?.pending_only) {
+        await signOut();
+      } else {
+        setNotice("Invitation rejected");
+      }
+    });
+  }
+
+  async function chooseWorkspace(workspace: WorkspaceRecord) {
+    if (workspace.active) return;
+    await runGuarded(async () => {
+      await switchWorkspace({ sessionToken, workspace_id: workspace.id });
+      window.location.reload();
     });
   }
 
@@ -678,6 +733,47 @@ export default function App() {
               </CardContent>
             </Card>
             <p className="authFootnote">Internal tools · Whagons team only</p>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (me?.pending_only) {
+    return (
+      <main className="authPage">
+        <section className="authStory" aria-label="Pending workspace invitation">
+          <div className="authAmbient authAmbientOne" />
+          <div className="brandSignature">
+            <div className="brandMark"><Command size={18} /></div>
+            <div><strong>Whagons</strong><span>Skills vault</span></div>
+          </div>
+          <div className="authStatement">
+            <Badge variant="accent"><ShieldCheck size={12} /> Explicit access</Badge>
+            <h1>Choose your<br /><em>workspace.</em></h1>
+            <p>An invitation never redirects your account automatically. Review who invited you before joining.</p>
+          </div>
+        </section>
+        <section className="authPanel">
+          <div className="authPanelInner">
+            <Card className="authCard">
+              <CardHeader className="authHeader">
+                <div className="authIcon"><Users size={21} /></div>
+                <div><p className="eyebrow">Pending invitation</p><CardTitle>Join a workspace?</CardTitle><CardDescription>Accepting grants access to its skills and credentials.</CardDescription></div>
+              </CardHeader>
+              <CardContent className="apiContent">
+                {invitations.length === 0 ? <span className="mutedText">No active invitation was found. Sign out and ask the owner to invite you again.</span> : invitations.map((invitation) => (
+                  <div className="keyRow" key={invitation.id}>
+                    <div><strong>{invitation.workspace_email || "Whagons workspace"}</strong><span>Invited {formatDate(invitation.created_at)}</span></div>
+                    <div className="rowActions">
+                      <Button type="button" variant="accent" onClick={() => void respondToInvitation(invitation, true)}>Accept</Button>
+                      <Button type="button" variant="ghost" onClick={() => void respondToInvitation(invitation, false)}>Reject</Button>
+                    </div>
+                  </div>
+                ))}
+                <Button type="button" variant="outline" onClick={() => void signOut()}><LogOut size={16} /> Sign out</Button>
+              </CardContent>
+            </Card>
           </div>
         </section>
       </main>
@@ -867,6 +963,14 @@ export default function App() {
                 <p className="summaryLine">{selectedSkill.summary || "A team instruction set ready for agents to use."}</p>
               </div>
               <div className="primaryActions">
+                {!selectedSkill.approved && isWorkspaceOwner ? (
+                  <Button type="button" variant="accent" onClick={() => void runGuarded(async () => {
+                    await approveSkill({ sessionToken, id: selectedSkill.id });
+                    setNotice("Approved skill for agent installation");
+                  })}>
+                    <ShieldCheck size={16} /> Approve
+                  </Button>
+                ) : null}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -922,6 +1026,7 @@ export default function App() {
                     <div><strong>SKILL.md</strong><small>Rendered document</small></div>
                   </div>
                   <div className="metaStrip">
+                    <Badge variant={selectedSkill.approved ? "accent" : "outline"}>{selectedSkill.approved ? "Approved" : "Review required"}</Badge>
                     {selectedContent !== null ? (
                       <>
                         <Badge variant="muted">{countWords(selectedContent).toLocaleString()} words</Badge>
@@ -935,7 +1040,13 @@ export default function App() {
                 </div>
                 <article className="markdownDoc">
                   {selectedContent !== null ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        img: ({ alt }) => <span className="mutedText">[Remote image blocked{alt ? `: ${alt}` : ""}]</span>,
+                        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+                      }}
+                    >
                       {displayMarkdown(selectedContent)}
                     </ReactMarkdown>
                   ) : null}
@@ -962,7 +1073,7 @@ export default function App() {
                 <p className="summaryLine">Create keys for the CLI and agents. New key values are shown once.</p>
               </div>
               <div className="primaryActions">
-                <Button type="button" variant="outline" onClick={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent setup")}>
+                <Button type="button" variant="outline" onClick={() => void copyText(agentSetupInstructions(), "Copied agent setup")}>
                   <Clipboard size={16} />
                   Copy setup
                 </Button>
@@ -987,7 +1098,28 @@ export default function App() {
                         required
                       />
                     </label>
-                    <Button type="submit" variant="accent">
+                    <fieldset className="scopeFieldset">
+                      <legend>Permissions</legend>
+                      {[
+                        ["skills:read", "Read approved skills"],
+                        ["skills:write", "Upload skills for review"],
+                        ["credentials:read", "Use credentials"],
+                        ["credentials:write", "Manage credentials"],
+                        ["keys:read", "List API keys"],
+                        ["keys:revoke", "Revoke other keys"],
+                      ].map(([scope, label]) => (
+                        <label key={scope}><input type="checkbox" checked={apiKeyScopes.includes(scope)} onChange={() => toggleAPIKeyScope(scope)} /><span>{label}</span></label>
+                      ))}
+                    </fieldset>
+                    <label>
+                      <span>Expires after</span>
+                      <select value={apiKeyExpiryDays} onChange={(event) => setAPIKeyExpiryDays(Number(event.target.value))}>
+                        <option value={7}>7 days</option>
+                        <option value={30}>30 days</option>
+                        <option value={90}>90 days</option>
+                      </select>
+                    </label>
+                    <Button type="submit" variant="accent" disabled={apiKeyScopes.length === 0}>
                       <KeyRound size={16} />
                       Create key
                     </Button>
@@ -1009,7 +1141,7 @@ export default function App() {
                       <div className="keyRow" key={key.id}>
                         <div>
                           <strong>{key.name}</strong>
-                          <span>{key.prefix}... · Created {formatDate(key.created_at)}</span>
+                          <span>{key.prefix}... · Expires {formatDate(key.expires_at)} · {key.scopes.join(", ")}</span>
                         </div>
                         <Button
                           type="button"
@@ -1032,14 +1164,14 @@ export default function App() {
                 <CardHeader>
                   <div className="settingsIcon"><TerminalSquare size={19} /></div>
                   <div><CardTitle>Agent handoff</CardTitle><CardDescription>A complete bootstrap prompt for Codex or another agent.</CardDescription></div>
-                  <Button type="button" variant="outline" size="sm" onClick={() => void copyText(agentSetupInstructions(freshAPIKey), "Copied agent handoff")}>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void copyText(agentSetupInstructions(), "Copied agent handoff")}>
                     <Clipboard size={16} />
                     Copy
                   </Button>
                 </CardHeader>
                 <CardContent className="apiContent">
                   <div className="apiCode">
-                    <pre>{agentSetupInstructions(freshAPIKey)}</pre>
+                    <pre>{agentSetupInstructions()}</pre>
                   </div>
                 </CardContent>
               </Card>
@@ -1066,7 +1198,7 @@ export default function App() {
                   <form className="credentialForm" onSubmit={(event) => void storeCredential(event)}>
                     <label><span>Name</span><Input value={credentialDraft.name} onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))} placeholder="coolify-whagons" required /></label>
                     <label><span>Description</span><Input value={credentialDraft.summary} onChange={(event) => setCredentialDraft((current) => ({ ...current, summary: event.target.value }))} placeholder="What this credential unlocks" /></label>
-                    <label><span>Secret value</span><Input value={credentialDraft.value} onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Paste the secret value" type="password" required /></label>
+                    <label><span>Secret value</span><Input value={credentialDraft.value} onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Paste the secret value" type="password" autoComplete="new-password" maxLength={262144} required /></label>
                     <Button type="submit" variant="accent">
                       <Plus size={16} />
                       Store credential
@@ -1091,9 +1223,9 @@ export default function App() {
                           <span>{credential.summary || `Updated ${formatDate(credential.updated_at)}`}</span>
                         </div>
                         <div className="rowActions">
-                          <Button type="button" variant="outline" size="sm" onClick={() => void copyCredential(credential)}>
-                            <Clipboard size={16} />
-                            Copy
+                          <Button type="button" variant="outline" size="sm" onClick={() => void copyText(`whagons-dev credentials exec ${shellQuote(credential.name)} -- <command>`, "Copied safe CLI command")}>
+                            <TerminalSquare size={16} />
+                            CLI command
                           </Button>
                           <Button
                             type="button"
@@ -1132,6 +1264,49 @@ export default function App() {
               </div>
             </header>
             <div className="settingsLayout settingsColumns">
+              {invitations.length > 0 ? (
+                <Card className="settingsCard">
+                  <CardHeader>
+                    <div className="settingsIcon"><ShieldCheck size={19} /></div>
+                    <div><CardTitle>Pending invitations</CardTitle><CardDescription>Review before changing workspaces.</CardDescription></div>
+                  </CardHeader>
+                  <CardContent className="apiContent">
+                    <div className="keyList">
+                      {invitations.map((invitation) => (
+                        <div className="keyRow" key={invitation.id}>
+                          <div><strong>{invitation.workspace_email || "Whagons workspace"}</strong><span>Invited {formatDate(invitation.created_at)}</span></div>
+                          <div className="rowActions">
+                            <Button type="button" variant="accent" size="sm" onClick={() => void respondToInvitation(invitation, true)}>Accept</Button>
+                            <Button type="button" variant="ghost" size="sm" onClick={() => void respondToInvitation(invitation, false)}>Reject</Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {workspaces.length > 1 ? (
+                <Card className="settingsCard">
+                  <CardHeader>
+                    <div className="settingsIcon"><Database size={19} /></div>
+                    <div><CardTitle>Workspace access</CardTitle><CardDescription>Switch only between workspaces you explicitly joined.</CardDescription></div>
+                  </CardHeader>
+                  <CardContent className="apiContent">
+                    <div className="keyList">
+                      {workspaces.map((workspace) => (
+                        <div className="keyRow" key={workspace.id}>
+                          <div><strong>{workspace.email || "Whagons workspace"}</strong><span>{workspace.is_owner ? "Your workspace" : "Shared workspace"}</span></div>
+                          <Button type="button" variant={workspace.active ? "outline" : "ghost"} size="sm" disabled={workspace.active} onClick={() => void chooseWorkspace(workspace)}>
+                            {workspace.active ? "Current" : "Switch"}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
+
               {isWorkspaceOwner ? (
                 <Card className="settingsCard">
                   <CardHeader>

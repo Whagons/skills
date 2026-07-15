@@ -3,6 +3,7 @@ FROM node:22.19.0-alpine AS build
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
 RUN npm install --global pnpm@11.10.0 \
     && pnpm install --frozen-lockfile
 

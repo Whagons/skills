@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@gonvex/cli@0.1.10': 838e7f952d283758044af33081e3b5070ce02ed15cf5cd4299598f780f263a4a
+
 importers:
 
   .:
@@ -15,14 +18,14 @@ importers:
         specifier: ^5.2.8
         version: 5.2.8
       '@gonvex/client':
-        specifier: ^0.1.8
-        version: 0.1.8
+        specifier: 0.1.10
+        version: 0.1.10
       '@gonvex/protocol':
-        specifier: ^0.1.8
-        version: 0.1.8
+        specifier: 0.1.10
+        version: 0.1.10
       '@gonvex/react':
-        specifier: ^0.1.8
-        version: 0.1.8(react@19.2.7)
+        specifier: 0.1.10
+        version: 0.1.10(react@19.2.7)
       '@radix-ui/react-avatar':
         specifier: ^1.2.2
         version: 1.2.2(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -45,10 +48,10 @@ importers:
         specifier: ^1.22.0
         version: 1.24.0(react@19.2.7)
       react:
-        specifier: latest
+        specifier: 19.2.7
         version: 19.2.7
       react-dom:
-        specifier: latest
+        specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
       react-markdown:
         specifier: ^10.1.0
@@ -63,17 +66,17 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
       vite:
-        specifier: latest
+        specifier: 8.1.4
         version: 8.1.4
     devDependencies:
       '@gonvex/cli':
-        specifier: ^0.1.8
-        version: 0.1.8(react@19.2.7)
+        specifier: 0.1.10
+        version: 0.1.10(patch_hash=838e7f952d283758044af33081e3b5070ce02ed15cf5cd4299598f780f263a4a)(react@19.2.7)
       '@types/react':
-        specifier: latest
+        specifier: 19.2.17
         version: 19.2.17
       '@types/react-dom':
-        specifier: latest
+        specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react':
         specifier: ^6.0.3
@@ -111,18 +114,18 @@ packages:
   '@fontsource-variable/manrope@5.2.8':
     resolution: {integrity: sha512-nc9lOuCRz73UHnovDE2bwXUdghE2SEOc7Aii0qGe3CLyE03W1a7VnY5Z6euRiapiKbCkGS+eXbY3s/kvWeGeSw==}
 
-  '@gonvex/cli@0.1.8':
-    resolution: {integrity: sha512-yq427Iae45lqKvR9io3sHcHppcCcxEiWcEXcNjQ/VtEAdwgWMhXhYj/AN+eAH9emiL3SNeGRT3sNdihDbFfKgA==}
+  '@gonvex/cli@0.1.10':
+    resolution: {integrity: sha512-lRLQJT44K35iIUhk4lPqACAR7N8EpCziUWsEJJW+LPjh3I5uIC8ITxTKMLjZM7GEC3ZJAgdbRS9X1GjP/j2OJQ==}
     hasBin: true
 
-  '@gonvex/client@0.1.8':
-    resolution: {integrity: sha512-LfYqdjTgscmWV3EJsA/YkPP36yxKPYzhDIEChOrBxRikSdcr7zBx+fZ+Z/3qkgEnMt3Eu7xl2ddWNkEo5+0Uag==}
+  '@gonvex/client@0.1.10':
+    resolution: {integrity: sha512-DMEcmCLONUxrHfDgPQEcHhh2xkMCWfe7+hnzUvf5+4Pp5ApuJ6pTBvZOGavYpr36lBHJkZoqrCrCIH6ydiwrdg==}
 
-  '@gonvex/protocol@0.1.8':
-    resolution: {integrity: sha512-zBbbSJPHTul5TZ35yDGBoKgdFYLish0ySBFHDy2QYsSBmzYiArHLQ/J79Ov6Hhy+jtcYMWSrnkoBCq6jYO5/hg==}
+  '@gonvex/protocol@0.1.10':
+    resolution: {integrity: sha512-lMy4SvUz5P0oLXQtU59BY7FHUf1HGiSAs2F1iPuMWFtKXdU+TsD7ktUh5C4mIlYVrg1dHmGOcr+658RL8u4QSQ==}
 
-  '@gonvex/react@0.1.8':
-    resolution: {integrity: sha512-aiquT+nK3Ou55BdJ/zWyWkwikFST2iirx2AvKgky33P/v6M6u4ZTUKwCoq7Oonag/HNoFgGbrb2bDqQ57ICVAg==}
+  '@gonvex/react@0.1.10':
+    resolution: {integrity: sha512-syWhz7izO23KUsqhGxILFyQVmB0+JrzAQp6p9qRcnb1Osn3+hXMRoBomvExhWy4PWNWpoyue7MwGO8XeEhZJOw==}
     peerDependencies:
       react: '>=19'
 
@@ -1060,24 +1063,24 @@ snapshots:
 
   '@fontsource-variable/manrope@5.2.8': {}
 
-  '@gonvex/cli@0.1.8(react@19.2.7)':
+  '@gonvex/cli@0.1.10(patch_hash=838e7f952d283758044af33081e3b5070ce02ed15cf5cd4299598f780f263a4a)(react@19.2.7)':
     dependencies:
-      '@gonvex/client': 0.1.8
-      '@gonvex/react': 0.1.8(react@19.2.7)
+      '@gonvex/client': 0.1.10
+      '@gonvex/react': 0.1.10(react@19.2.7)
     transitivePeerDependencies:
       - react
 
-  '@gonvex/client@0.1.8':
+  '@gonvex/client@0.1.10':
     dependencies:
-      '@gonvex/protocol': 0.1.8
+      '@gonvex/protocol': 0.1.10
       dexie: 4.4.4
 
-  '@gonvex/protocol@0.1.8': {}
+  '@gonvex/protocol@0.1.10': {}
 
-  '@gonvex/react@0.1.8(react@19.2.7)':
+  '@gonvex/react@0.1.10(react@19.2.7)':
     dependencies:
-      '@gonvex/client': 0.1.8
-      '@gonvex/protocol': 0.1.8
+      '@gonvex/client': 0.1.10
+      '@gonvex/protocol': 0.1.10
       react: 19.2.7
 
   '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)':

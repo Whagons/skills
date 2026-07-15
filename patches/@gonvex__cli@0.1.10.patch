@@ -1,0 +1,49 @@
+diff --git a/dist/index.js b/dist/index.js
+index 7323d48cb15cd91e66bac45b54a6b155109a625b..e2ef1afdf9dff2fa66db6bb2930822f5bfe1f84f 100755
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -405,6 +405,7 @@ async function runDev(argv) {
+             stdio: "inherit",
+             signal: controller.signal,
+             shell: process.platform === "win32",
++            env: publicChildEnvironment(),
+         });
+         const code = await new Promise((resolve) => child.on("exit", resolve));
+         controller.abort();
+@@ -1558,18 +1559,34 @@ function envLineValue(line) {
+ function webSocketURL(runtimeURL) {
+     return runtimeURL.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
+ }
++function publicChildEnvironment() {
++    const safeExact = new Set([
++        "CI", "COLORTERM", "COMSPEC", "FORCE_COLOR", "HOME", "LANG", "LOGNAME",
++        "NODE_ENV", "NO_COLOR", "PATH", "PATHEXT", "PWD", "SHELL", "SYSTEMROOT",
++        "TEMP", "TERM", "TMP", "TMPDIR", "USER", "WINDIR",
++    ]);
++    const sensitiveName = /(API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|AUTH)/i;
++    return Object.fromEntries(Object.entries(process.env).filter(([name]) => {
++        const upper = name.toUpperCase();
++        if (sensitiveName.test(upper))
++            return false;
++        return safeExact.has(upper) || upper.startsWith("LC_") || upper.startsWith("VITE_");
++    }));
++}
+ function logStreamURL(settings) {
+     const url = new URL(settings.runtimeURL.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/dev/logs/stream");
+     if (settings.projectID)
+         url.searchParams.set("project", settings.projectID);
+-    if (settings.key)
+-        url.searchParams.set("key", settings.key);
+     url.searchParams.set("replay", "0");
+     return url.toString();
+ }
+ async function startRuntimeLogStream(settings, signal, options) {
+     if (!settings.projectID || typeof globalThis.WebSocket !== "function")
+         return;
++    if (settings.key) {
++        console.warn(`[gonvex] authenticated browser log streaming is disabled because WebSocket URLs can leak project keys; continuing without streamed logs`);
++        return;
++    }
+     let warned = false;
+     let retryDelay = 500;
+     let stopped = false;

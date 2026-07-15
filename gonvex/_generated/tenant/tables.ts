@@ -10,6 +10,16 @@ export const tables = {
         primaryKey: false,
         type: "time",
       },
+      created_by: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      expires_at: {
+        nullable: false,
+        primaryKey: false,
+        type: "time",
+      },
       id: {
         nullable: false,
         primaryKey: true,
@@ -36,9 +46,14 @@ export const tables = {
         type: "string",
       },
       revoked_at: {
-        nullable: false,
+        nullable: true,
         primaryKey: false,
         type: "time",
+      },
+      scopes: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
       },
     },
     indexes: {
@@ -119,8 +134,13 @@ export const tables = {
         primaryKey: false,
         type: "string",
       },
-      revoked_at: {
+      pending_only: {
         nullable: false,
+        primaryKey: false,
+        type: "bool",
+      },
+      revoked_at: {
+        nullable: true,
         primaryKey: false,
         type: "time",
       },
@@ -148,6 +168,11 @@ export const tables = {
   },
   skill_users: {
     columns: {
+      can_own: {
+        nullable: false,
+        primaryKey: false,
+        type: "bool",
+      },
       created_at: {
         nullable: false,
         primaryKey: false,
@@ -177,6 +202,55 @@ export const tables = {
     indexes: {
       by_email: {
         columns: ["email"],
+        unique: false,
+      },
+    },
+  },
+  skill_workspace_invitations: {
+    columns: {
+      accepted_at: {
+        nullable: true,
+        primaryKey: false,
+        type: "time",
+      },
+      created_at: {
+        nullable: false,
+        primaryKey: false,
+        type: "time",
+      },
+      email: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      id: {
+        nullable: false,
+        primaryKey: true,
+        type: "id",
+      },
+      invited_by: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      rejected_at: {
+        nullable: true,
+        primaryKey: false,
+        type: "time",
+      },
+      workspace_owner_id: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+    },
+    indexes: {
+      by_email: {
+        columns: ["email"],
+        unique: false,
+      },
+      by_workspace_email: {
+        columns: ["workspace_owner_id","email"],
         unique: false,
       },
     },
@@ -222,7 +296,22 @@ export const tables = {
   },
   skills: {
     columns: {
+      approved_at: {
+        nullable: true,
+        primaryKey: false,
+        type: "time",
+      },
+      approved_by: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
       content: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      content_hash: {
         nullable: false,
         primaryKey: false,
         type: "string",
