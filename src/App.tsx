@@ -35,6 +35,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./com
 import { Input } from "./components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip";
 import { getAuthErrorMessage } from "./lib/auth-error";
+import { dedupeCredentials } from "./lib/credentials";
+import {
+  readVaultTab,
+  vaultURLForSkill,
+  vaultURLForTab,
+  vaultURLWithoutCLIAuth,
+  type VaultTab,
+} from "./lib/vault-state";
 
 type SkillMeta = {
   id: string;
@@ -119,7 +127,6 @@ type WorkspaceRecord = {
   active: boolean;
 };
 
-type VaultTab = "skills" | "apiKeys" | "credentials" | "team";
 type ColorTheme = "light" | "dark";
 
 const sessionStorageKey = "whagons-skills-vault-session";
@@ -339,7 +346,7 @@ export default function App() {
   });
   const [authError, setAuthError] = useState("");
   const [query, setQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<VaultTab>("skills");
+  const [activeTab, setActiveTab] = useState<VaultTab>(() => readVaultTab(window.location.href));
   const [selectedID, setSelectedID] = useState(() => decodeURIComponent(window.location.hash.replace(/^#/, "")));
   const [notice, setNotice] = useState("");
   const [freshAPIKey, setFreshAPIKey] = useState("");
@@ -347,6 +354,7 @@ export default function App() {
   const [apiKeyScopes, setAPIKeyScopes] = useState<string[]>(readOnlyScopes);
   const [apiKeyExpiryDays, setAPIKeyExpiryDays] = useState(30);
   const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>({ name: "", summary: "", value: "" });
+  const [credentialSaving, setCredentialSaving] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
 
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
@@ -354,7 +362,7 @@ export default function App() {
   const activeWorkspaceArgs = sessionToken && me && !me.pending_only ? { sessionToken } : "skip";
   const skills = useQuery<SkillMeta[]>(api.skills.list, activeWorkspaceArgs) ?? [];
   const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, activeWorkspaceArgs) ?? [];
-  const credentials = useQuery<CredentialMeta[]>(api.credentials.list, activeWorkspaceArgs) ?? [];
+  const credentialRecords = useQuery<CredentialMeta[]>(api.credentials.list, activeWorkspaceArgs) ?? [];
   const teamMembers = useQuery<TeamMember[]>(api.team.list, activeWorkspaceArgs) ?? [];
   const invitations = useQuery<WorkspaceInvitation[]>(api.team.invitations.list, protectedArgs) ?? [];
   const workspaces = useQuery<WorkspaceRecord[]>(api.auth.workspaces, protectedArgs) ?? [];
@@ -389,6 +397,16 @@ export default function App() {
   ) ?? null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
   const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && new Date(key.expires_at).getTime() > Date.now());
+  const credentials = useMemo(() => dedupeCredentials(credentialRecords), [credentialRecords]);
+
+  function changeVaultTab(tab: VaultTab) {
+    setActiveTab(tab);
+    const nextURL = vaultURLForTab(window.location.href, tab);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextURL !== current) {
+      window.history.pushState(null, "", nextURL);
+    }
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -411,10 +429,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    function onPopState() {
+      setActiveTab(readVaultTab(window.location.href));
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
     function onSearchShortcut(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setActiveTab("skills");
+        changeVaultTab("skills");
         window.setTimeout(() => searchInputRef.current?.focus(), 0);
       }
     }
@@ -569,7 +595,7 @@ export default function App() {
       });
       if (!response.ok) throw new Error(`callback returned ${response.status}`);
       setCliAuthRequest(null);
-      window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+      window.history.replaceState(null, "", vaultURLWithoutCLIAuth(window.location.href));
       setNotice("CLI authorized — return to your terminal");
     } catch (error) {
       await revokeAPIKey({ sessionToken, id: result.record.id }).catch(() => undefined);
@@ -608,11 +634,17 @@ export default function App() {
 
   async function storeCredential(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runGuarded(async () => {
-      await saveCredential({ sessionToken, ...credentialDraft });
-      setCredentialDraft({ name: "", summary: "", value: "" });
-      setNotice("Stored credential");
-    });
+    if (credentialSaving) return;
+    setCredentialSaving(true);
+    try {
+      await runGuarded(async () => {
+        await saveCredential({ sessionToken, ...credentialDraft });
+        setCredentialDraft({ name: "", summary: "", value: "" });
+        setNotice("Stored credential");
+      });
+    } finally {
+      setCredentialSaving(false);
+    }
   }
 
   async function respondToInvitation(invitation: WorkspaceInvitation, accept: boolean) {
@@ -795,22 +827,22 @@ export default function App() {
         </div>
 
         <div className="tabNav" aria-label="Vault sections">
-          <button className={activeTab === "skills" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("skills")}>
+          <button className={activeTab === "skills" ? "tabButton active" : "tabButton"} type="button" onClick={() => changeVaultTab("skills")}>
             <span className="tabIcon"><LibraryBig size={17} /></span>
             <span>Skills</span>
             <small>{skills.length.toString().padStart(2, "0")}</small>
           </button>
-          <button className={activeTab === "apiKeys" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("apiKeys")}>
+          <button className={activeTab === "apiKeys" ? "tabButton active" : "tabButton"} type="button" onClick={() => changeVaultTab("apiKeys")}>
             <span className="tabIcon"><Fingerprint size={17} /></span>
             <span>API keys</span>
             <small>{activeAPIKeys.length.toString().padStart(2, "0")}</small>
           </button>
-          <button className={activeTab === "credentials" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("credentials")}>
+          <button className={activeTab === "credentials" ? "tabButton active" : "tabButton"} type="button" onClick={() => changeVaultTab("credentials")}>
             <span className="tabIcon"><Vault size={17} /></span>
             <span>Credentials</span>
             <small>{credentials.length.toString().padStart(2, "0")}</small>
           </button>
-          <button className={activeTab === "team" ? "tabButton active" : "tabButton"} type="button" onClick={() => setActiveTab("team")}>
+          <button className={activeTab === "team" ? "tabButton active" : "tabButton"} type="button" onClick={() => changeVaultTab("team")}>
             <span className="tabIcon"><Users size={17} /></span>
             <span>Team</span>
             <small>{teamMembers.length.toString().padStart(2, "0")}</small>
@@ -847,7 +879,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setSelectedID(skill.id);
-                    window.history.replaceState(null, "", `#${encodeURIComponent(skill.id)}`);
+                    window.history.replaceState(null, "", vaultURLForSkill(window.location.href, skill.id));
                   }}
                 >
                   <span className="skillRowIndex">{String(filteredSkills.indexOf(skill) + 1).padStart(2, "0")}</span>
@@ -946,7 +978,7 @@ export default function App() {
                 aria-label="Dismiss CLI authorization"
                 onClick={() => {
                   setCliAuthRequest(null);
-                  window.history.replaceState(null, "", window.location.pathname + window.location.hash);
+                  window.history.replaceState(null, "", vaultURLWithoutCLIAuth(window.location.href));
                 }}
               >
                 <X size={16} />
@@ -1060,7 +1092,7 @@ export default function App() {
             <p className="eyebrow">Empty library</p>
             <h2>Your first skill belongs here.</h2>
             <p>Create an API key and let agents upload skills into the vault.</p>
-            <Button variant="accent" onClick={() => setActiveTab("apiKeys")}><KeyRound size={16} /> Create API key</Button>
+            <Button variant="accent" onClick={() => changeVaultTab("apiKeys")}><KeyRound size={16} /> Create API key</Button>
           </div>
         ) : null}
 
@@ -1199,9 +1231,9 @@ export default function App() {
                     <label><span>Name</span><Input value={credentialDraft.name} onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))} placeholder="coolify-whagons" required /></label>
                     <label><span>Description</span><Input value={credentialDraft.summary} onChange={(event) => setCredentialDraft((current) => ({ ...current, summary: event.target.value }))} placeholder="What this credential unlocks" /></label>
                     <label><span>Secret value</span><Input value={credentialDraft.value} onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Paste the secret value" type="password" autoComplete="new-password" maxLength={262144} required /></label>
-                    <Button type="submit" variant="accent">
+                    <Button type="submit" variant="accent" disabled={credentialSaving}>
                       <Plus size={16} />
-                      Store credential
+                      {credentialSaving ? "Storing…" : "Store credential"}
                     </Button>
                   </form>
                 </CardContent>

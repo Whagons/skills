@@ -984,7 +984,11 @@ func GetCredential(ctx *gonvex.MutationCtx, args GetCredentialArgs) (Credential,
 	if err != nil {
 		return Credential{}, err
 	}
-	return getCredential(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
+	keys := credentialKeyConfig{
+		Current:  ctx.EnvValue("SKILLS_SECRET_KEY"),
+		Previous: ctx.EnvValue("SKILLS_SECRET_KEY_PREVIOUS"),
+	}
+	return getCredential(ctx.Context, ctx.DB, ownerID, args.ID, args.Name, keys)
 }
 
 func SaveCredential(ctx *gonvex.MutationCtx, args SaveCredentialArgs) (CredentialMeta, error) {
@@ -992,10 +996,14 @@ func SaveCredential(ctx *gonvex.MutationCtx, args SaveCredentialArgs) (Credentia
 	if err != nil {
 		return CredentialMeta{}, err
 	}
-	return saveCredential(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Value)
+	keys := credentialKeyConfig{
+		Current:  ctx.EnvValue("SKILLS_SECRET_KEY"),
+		Previous: ctx.EnvValue("SKILLS_SECRET_KEY_PREVIOUS"),
+	}
+	return saveCredential(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Value, keys)
 }
 
-func saveCredential(ctx context.Context, runner execQueryer, ownerID string, credentialID string, credentialName string, credentialSummary string, credentialValue string) (CredentialMeta, error) {
+func saveCredential(ctx context.Context, runner execQueryer, ownerID string, credentialID string, credentialName string, credentialSummary string, credentialValue string, keys credentialKeyConfig) (CredentialMeta, error) {
 	name := strings.TrimSpace(credentialName)
 	value := credentialValue
 	if name == "" {
@@ -1027,7 +1035,7 @@ func saveCredential(ctx context.Context, runner execQueryer, ownerID string, cre
 	if len(id) > 240 {
 		return CredentialMeta{}, errors.New("credential id is too long")
 	}
-	id = scopedID(ownerID, id)
+	id = existingCredentialID(ctx, runner, ownerID, id, name)
 	var exists bool
 	if err := runner.QueryRowContext(ctx, `select exists(select 1 from skill_credentials where owner_id = $1 and id = $2)`, ownerID, id).Scan(&exists); err != nil {
 		return CredentialMeta{}, err
@@ -1041,7 +1049,7 @@ func saveCredential(ctx context.Context, runner execQueryer, ownerID string, cre
 			return CredentialMeta{}, fmt.Errorf("workspace credential limit reached (%d)", maxWorkspaceCredentials)
 		}
 	}
-	storedValue, err := encryptSecret(ownerID, id, value)
+	storedValue, err := encryptSecret(keys, ownerID, id, value)
 	if err != nil {
 		return CredentialMeta{}, err
 	}
@@ -1178,10 +1186,14 @@ func AgentGetCredential(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Credential, 
 	if err != nil {
 		return Credential{}, err
 	}
-	return getCredential(ctx.Context, ctx.DB, ownerID, args.ID, args.Name)
+	keys := credentialKeyConfig{
+		Current:  ctx.EnvValue("SKILLS_SECRET_KEY"),
+		Previous: ctx.EnvValue("SKILLS_SECRET_KEY_PREVIOUS"),
+	}
+	return getCredential(ctx.Context, ctx.DB, ownerID, args.ID, args.Name, keys)
 }
 
-func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, name string) (Credential, error) {
+func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, name string, keys credentialKeyConfig) (Credential, error) {
 	if db == nil {
 		return Credential{}, errors.New("database is not configured")
 	}
@@ -1202,12 +1214,12 @@ func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, n
 		}
 		return Credential{}, err
 	}
-	value, migrate, err := decryptSecret(ownerID, credential.ID, credential.Value)
+	value, migrate, err := decryptSecret(keys, ownerID, credential.ID, credential.Value)
 	if err != nil {
 		return Credential{}, err
 	}
 	if migrate {
-		stored, err := encryptSecret(ownerID, credential.ID, value)
+		stored, err := encryptSecret(keys, ownerID, credential.ID, value)
 		if err != nil {
 			return Credential{}, err
 		}
@@ -1224,7 +1236,11 @@ func AgentSaveCredential(ctx *gonvex.MutationCtx, args AgentSaveCredentialArgs) 
 	if err != nil {
 		return CredentialMeta{}, err
 	}
-	return saveCredential(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Value)
+	keys := credentialKeyConfig{
+		Current:  ctx.EnvValue("SKILLS_SECRET_KEY"),
+		Previous: ctx.EnvValue("SKILLS_SECRET_KEY_PREVIOUS"),
+	}
+	return saveCredential(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Value, keys)
 }
 
 func AgentDeleteCredential(ctx *gonvex.MutationCtx, args AgentDeleteCredentialArgs) (DeleteResult, error) {
@@ -1461,15 +1477,64 @@ func listCredentialMeta(ctx context.Context, db *sql.DB, ownerID string) ([]Cred
 		return nil, err
 	}
 	defer rows.Close()
-	credentials := []CredentialMeta{}
+	byName := map[string]CredentialMeta{}
 	for rows.Next() {
 		var credential CredentialMeta
 		if err := rows.Scan(&credential.ID, &credential.Name, &credential.Summary, &credential.CreatedAt, &credential.UpdatedAt); err != nil {
 			return nil, err
 		}
+		key := strings.ToLower(strings.TrimSpace(credential.Name))
+		if current, ok := byName[key]; !ok || credential.UpdatedAt.After(current.UpdatedAt) {
+			byName[key] = credential
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	credentials := make([]CredentialMeta, 0, len(byName))
+	for _, credential := range byName {
 		credentials = append(credentials, credential)
 	}
-	return credentials, rows.Err()
+	sort.Slice(credentials, func(i, j int) bool {
+		left := strings.ToLower(credentials[i].Name)
+		right := strings.ToLower(credentials[j].Name)
+		if left == right {
+			return credentials[i].UpdatedAt.After(credentials[j].UpdatedAt)
+		}
+		return left < right
+	})
+	return credentials, nil
+}
+
+func existingCredentialID(ctx context.Context, runner execer, ownerID string, id string, name string) string {
+	scoped := scopedID(ownerID, id)
+	q, ok := runner.(queryer)
+	if !ok {
+		return scoped
+	}
+	var existing string
+	err := q.QueryRowContext(ctx, `
+		select id
+		from skill_credentials
+		where owner_id = $1 and (
+			id = $2
+			or id = $3
+			or lower(btrim(name)) = lower($4)
+		)
+		order by
+			case
+				when id = $2 then 0
+				when lower(btrim(name)) = lower($4) then 1
+				when id = $3 then 2
+				else 3
+			end,
+			updated_at desc
+		limit 1
+	`, ownerID, scoped, strings.TrimSpace(id), strings.TrimSpace(name)).Scan(&existing)
+	if err == nil && strings.TrimSpace(existing) != "" {
+		return existing
+	}
+	return scoped
 }
 
 func mutationRunner(ctx *gonvex.MutationCtx) execQueryer {
@@ -1587,6 +1652,15 @@ func ensureTables(ctx context.Context, db execer) error {
 		`create index if not exists skill_api_keys_by_owner_created_at on skill_api_keys(owner_id, created_at)`,
 		`create index if not exists skill_sessions_by_owner_token_hash on skill_sessions(owner_id, token_hash)`,
 		`create index if not exists skill_credentials_by_owner_name on skill_credentials(owner_id, lower(name))`,
+		`delete from skill_credentials as stale
+			using skill_credentials as current
+			where stale.owner_id = current.owner_id
+				and lower(btrim(stale.name)) = lower(btrim(current.name))
+				and (
+					stale.updated_at < current.updated_at
+					or (stale.updated_at = current.updated_at and stale.id < current.id)
+				)`,
+		`create unique index if not exists skill_credentials_unique_owner_name on skill_credentials(owner_id, lower(btrim(name)))`,
 		`create unique index if not exists skill_workspace_members_unique on skill_workspace_members(workspace_owner_id, email)`,
 		`create unique index if not exists skill_workspace_invitations_pending_unique on skill_workspace_invitations(workspace_owner_id, email) where accepted_at is null and rejected_at is null`,
 	}
@@ -1903,6 +1977,11 @@ type credentialCipher struct {
 	aead cipher.AEAD
 }
 
+type credentialKeyConfig struct {
+	Current  string
+	Previous string
+}
+
 func decodeCredentialKey(raw string) ([]byte, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1937,12 +2016,19 @@ func newCredentialCipher(raw string) (credentialCipher, error) {
 	return credentialCipher{id: hashToken(string(key))[:12], aead: aead}, nil
 }
 
-func credentialCiphers() ([]credentialCipher, error) {
-	current := strings.TrimSpace(os.Getenv("SKILLS_SECRET_KEY"))
+func credentialCiphers(config credentialKeyConfig) ([]credentialCipher, error) {
+	current := strings.TrimSpace(config.Current)
+	if current == "" {
+		current = strings.TrimSpace(os.Getenv("SKILLS_SECRET_KEY"))
+	}
 	if current == "" {
 		return nil, errors.New("SKILLS_SECRET_KEY must be configured before credentials can be stored or read")
 	}
-	rawKeys := append([]string{current}, splitCSV(os.Getenv("SKILLS_SECRET_KEY_PREVIOUS"))...)
+	previous := strings.TrimSpace(config.Previous)
+	if previous == "" {
+		previous = os.Getenv("SKILLS_SECRET_KEY_PREVIOUS")
+	}
+	rawKeys := append([]string{current}, splitCSV(previous)...)
 	result := make([]credentialCipher, 0, len(rawKeys))
 	seen := map[string]bool{}
 	for _, raw := range rawKeys {
@@ -1962,8 +2048,8 @@ func credentialAAD(ownerID, credentialID string) []byte {
 	return []byte("whagons-skills/credential/" + ownerID + "/" + credentialID)
 }
 
-func encryptSecret(ownerID, credentialID, value string) (string, error) {
-	ciphers, err := credentialCiphers()
+func encryptSecret(config credentialKeyConfig, ownerID, credentialID, value string) (string, error) {
+	ciphers, err := credentialCiphers(config)
 	if err != nil {
 		return "", err
 	}
@@ -1976,8 +2062,8 @@ func encryptSecret(ownerID, credentialID, value string) (string, error) {
 	return encryptedValuePrefix + current.id + ":" + base64.RawStdEncoding.EncodeToString(sealed), nil
 }
 
-func decryptSecret(ownerID, credentialID, value string) (string, bool, error) {
-	ciphers, err := credentialCiphers()
+func decryptSecret(config credentialKeyConfig, ownerID, credentialID, value string) (string, bool, error) {
+	ciphers, err := credentialCiphers(config)
 	if err != nil {
 		return "", false, err
 	}
