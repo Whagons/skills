@@ -8,6 +8,8 @@ import {
   Code2,
   Command,
   Database,
+  Eye,
+  EyeOff,
   Fingerprint,
   KeyRound,
   LibraryBig,
@@ -15,6 +17,7 @@ import {
   LockKeyhole,
   LogOut,
   Moon,
+  Pencil,
   Plus,
   Search,
   ShieldCheck,
@@ -86,7 +89,12 @@ type CredentialMeta = {
   updated_at: string;
 };
 
+type Credential = CredentialMeta & {
+  value: string;
+};
+
 type CredentialDraft = {
+  id: string;
   name: string;
   summary: string;
   value: string;
@@ -133,6 +141,7 @@ const sessionStorageKey = "whagons-skills-vault-session";
 const themeStorageKey = "whagons-skills-vault-theme";
 const readOnlyScopes = ["skills:read"];
 const cliScopes = ["skills:read", "skills:write", "credentials:read", "credentials:write", "keys:read", "keys:revoke"];
+const emptyCredentialDraft: CredentialDraft = { id: "", name: "", summary: "", value: "" };
 
 type StoredSession = {
   sessionToken: string;
@@ -353,8 +362,10 @@ export default function App() {
   const [apiKeyName, setAPIKeyName] = useState("");
   const [apiKeyScopes, setAPIKeyScopes] = useState<string[]>(readOnlyScopes);
   const [apiKeyExpiryDays, setAPIKeyExpiryDays] = useState(30);
-  const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>({ name: "", summary: "", value: "" });
+  const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>(emptyCredentialDraft);
   const [credentialSaving, setCredentialSaving] = useState(false);
+  const [credentialSecrets, setCredentialSecrets] = useState<Record<string, string>>({});
+  const [credentialLoadingID, setCredentialLoadingID] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
 
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
@@ -373,6 +384,7 @@ export default function App() {
   const approveSkill = useMutation(api.skills.approve);
   const createAPIKey = useMutation(api.apiKeys.create);
   const revokeAPIKey = useMutation(api.apiKeys.revoke);
+  const getCredential = useMutation(api.credentials.get);
   const saveCredential = useMutation(api.credentials.save);
   const deleteCredential = useMutation(api.credentials.delete);
   const inviteMember = useMutation(api.team.invite);
@@ -639,11 +651,71 @@ export default function App() {
     try {
       await runGuarded(async () => {
         await saveCredential({ sessionToken, ...credentialDraft });
-        setCredentialDraft({ name: "", summary: "", value: "" });
-        setNotice("Stored credential");
+        setCredentialSecrets((current) => {
+          if (!credentialDraft.id) return current;
+          const next = { ...current };
+          delete next[credentialDraft.id];
+          return next;
+        });
+        setCredentialDraft(emptyCredentialDraft);
+        setNotice(credentialDraft.id ? "Updated credential" : "Stored credential");
       });
     } finally {
       setCredentialSaving(false);
+    }
+  }
+
+  async function loadCredential(credential: CredentialMeta) {
+    return getCredential({ sessionToken, id: credential.id, name: "" }) as Promise<Credential>;
+  }
+
+  async function editCredential(credential: CredentialMeta) {
+    setCredentialLoadingID(credential.id);
+    try {
+      await runGuarded(async () => {
+        const full = await loadCredential(credential);
+        setCredentialDraft({
+          id: credential.id,
+          name: credential.name,
+          summary: credential.summary,
+          value: full.value,
+        });
+        setNotice(`Editing ${credential.name}`);
+      });
+    } finally {
+      setCredentialLoadingID("");
+    }
+  }
+
+  async function toggleCredentialValue(credential: CredentialMeta) {
+    if (credentialSecrets[credential.id] !== undefined) {
+      setCredentialSecrets((current) => {
+        const next = { ...current };
+        delete next[credential.id];
+        return next;
+      });
+      return;
+    }
+    setCredentialLoadingID(credential.id);
+    try {
+      await runGuarded(async () => {
+        const full = await loadCredential(credential);
+        setCredentialSecrets((current) => ({ ...current, [credential.id]: full.value }));
+      });
+    } finally {
+      setCredentialLoadingID("");
+    }
+  }
+
+  async function copyCredentialValue(credential: CredentialMeta) {
+    setCredentialLoadingID(credential.id);
+    try {
+      await runGuarded(async () => {
+        const full = await loadCredential(credential);
+        await copyText(full.value, `Copied ${credential.name} value`);
+      });
+    } finally {
+      setCredentialLoadingID("");
     }
   }
 
@@ -1217,24 +1289,35 @@ export default function App() {
               <div className="headerCopy">
                 <p className="eyebrow"><span>Secure storage</span> / Secrets</p>
                 <h2>Credentials</h2>
-                <p className="summaryLine">Store credentials for the CLI and agents. Values are never shown in this list.</p>
+                <p className="summaryLine">Store credentials for the CLI and agents. Values stay hidden until you explicitly reveal or copy them.</p>
               </div>
             </header>
             <div className="settingsLayout settingsColumns">
               <Card className="settingsCard">
                 <CardHeader>
-                  <div className="settingsIcon"><Plus size={19} /></div>
-                  <div><CardTitle>Store a credential</CardTitle><CardDescription>Save or replace a workspace secret.</CardDescription></div>
+                  <div className="settingsIcon">{credentialDraft.id ? <Pencil size={19} /> : <Plus size={19} />}</div>
+                  <div>
+                    <CardTitle>{credentialDraft.id ? "Edit credential" : "Store a credential"}</CardTitle>
+                    <CardDescription>{credentialDraft.id ? "Update the selected workspace secret by ID." : "Save a new workspace secret."}</CardDescription>
+                  </div>
                 </CardHeader>
                 <CardContent className="apiContent">
                   <form className="credentialForm" onSubmit={(event) => void storeCredential(event)}>
                     <label><span>Name</span><Input value={credentialDraft.name} onChange={(event) => setCredentialDraft((current) => ({ ...current, name: event.target.value }))} placeholder="coolify-whagons" required /></label>
                     <label><span>Description</span><Input value={credentialDraft.summary} onChange={(event) => setCredentialDraft((current) => ({ ...current, summary: event.target.value }))} placeholder="What this credential unlocks" /></label>
                     <label><span>Secret value</span><Input value={credentialDraft.value} onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Paste the secret value" type="password" autoComplete="new-password" maxLength={262144} required /></label>
-                    <Button type="submit" variant="accent" disabled={credentialSaving}>
-                      <Plus size={16} />
-                      {credentialSaving ? "Storing…" : "Store credential"}
-                    </Button>
+                    <div className="credentialFormActions">
+                      <Button type="submit" variant="accent" disabled={credentialSaving}>
+                        {credentialDraft.id ? <Pencil size={16} /> : <Plus size={16} />}
+                        {credentialSaving ? "Saving…" : credentialDraft.id ? "Update credential" : "Store credential"}
+                      </Button>
+                      {credentialDraft.id ? (
+                        <Button type="button" variant="ghost" onClick={() => setCredentialDraft(emptyCredentialDraft)}>
+                          <X size={16} />
+                          Cancel
+                        </Button>
+                      ) : null}
+                    </div>
                   </form>
                 </CardContent>
               </Card>
@@ -1253,8 +1336,43 @@ export default function App() {
                         <div>
                           <strong>{credential.name}</strong>
                           <span>{credential.summary || `Updated ${formatDate(credential.updated_at)}`}</span>
+                          {credentialSecrets[credential.id] !== undefined ? (
+                            <code className="credentialSecret" aria-label={`${credential.name} value`}>
+                              {credentialSecrets[credential.id]}
+                            </code>
+                          ) : null}
                         </div>
                         <div className="rowActions">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={credentialLoadingID === credential.id}
+                            onClick={() => void editCredential(credential)}
+                          >
+                            <Pencil size={16} />
+                            Edit
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={credentialLoadingID === credential.id}
+                            onClick={() => void toggleCredentialValue(credential)}
+                          >
+                            {credentialSecrets[credential.id] !== undefined ? <EyeOff size={16} /> : <Eye size={16} />}
+                            {credentialSecrets[credential.id] !== undefined ? "Hide value" : "Show value"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={credentialLoadingID === credential.id}
+                            onClick={() => void copyCredentialValue(credential)}
+                          >
+                            <Clipboard size={16} />
+                            Copy value
+                          </Button>
                           <Button type="button" variant="outline" size="sm" onClick={() => void copyText(`whagons-dev credentials exec ${shellQuote(credential.name)} -- <command>`, "Copied safe CLI command")}>
                             <TerminalSquare size={16} />
                             CLI command

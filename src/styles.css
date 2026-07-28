@@ -1649,6 +1649,7 @@ button {
 
 .keyRow .rowActions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 5px;
@@ -1693,6 +1694,28 @@ button {
 
 .credentialForm .ui-button {
   justify-self: start;
+}
+
+.credentialFormActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.credentialSecret {
+  display: block;
+  max-height: 120px;
+  overflow: auto;
+  padding: 9px 10px;
+  border: 1px solid #d8d4ca;
+  border-radius: 7px;
+  background: #f4f1e9;
+  color: #31332d;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .apiCode {

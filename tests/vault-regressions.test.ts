@@ -34,6 +34,16 @@ test("credential saves replace a matching workspace name instead of allocating a
   assert.match(backend, /skill_credentials_unique_owner_name/);
 });
 
+test("credential rows support ID-based editing and protected reveal or copy", async () => {
+  const app = await source("src/App.tsx");
+
+  assert.match(app, /getCredential\(\{ sessionToken, id: credential\.id, name: "" \}\)/);
+  assert.match(app, /setCredentialDraft\(\{\s*id: credential\.id,/);
+  assert.match(app, /saveCredential\(\{ sessionToken, \.\.\.credentialDraft \}\)/);
+  assert.match(app, /Copy value/);
+  assert.match(app, /Hide value|Show value/);
+});
+
 test("credential encryption reads the Gonvex project environment from the request context", async () => {
   const backend = await source("gonvex/skills.go");
   assert.match(backend, /ctx\.EnvValue\("SKILLS_SECRET_KEY"\)/);
