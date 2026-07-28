@@ -48,6 +48,10 @@ type Skill struct {
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+	// Approved reports whether the workspace owner has approved this skill.
+	// Agent uploads always land unapproved, and re-uploading an already
+	// approved skill resets it, so this must be surfaced to the caller.
+	Approved bool `json:"approved"`
 }
 
 type APIKeyRecord struct {
@@ -328,7 +332,7 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Uploaded %s\n", skill.Name)
+		reportUpload(skill)
 		return nil
 	case "sync":
 		root := "."
@@ -344,7 +348,7 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Uploaded %s\n", skill.Name)
+			reportUpload(skill)
 		}
 		fmt.Printf("Synced %d skills\n", len(files))
 		return nil
@@ -1077,6 +1081,25 @@ func uploadSkill(client *Client, apiKey, path, id, name, summary string) (Skill,
 	var skill Skill
 	err = client.Mutation("agent.skills.upload", map[string]any{"apiKey": apiKey, "id": id, "name": name, "summary": summary, "content": content}, &skill)
 	return skill, err
+}
+
+// reportUpload prints the result of an upload. Agent uploads are saved with
+// approved=false, and agent reads (skills list / skills get) return only
+// approved skills, so an unapproved upload is invisible to the CLI that just
+// wrote it. Say so explicitly rather than printing a bare success line.
+func reportUpload(skill Skill) {
+	if skill.Approved {
+		fmt.Printf("Uploaded %s\n", skill.Name)
+		return
+	}
+	config, _ := readConfig()
+	appURL := firstNonEmpty(envValue("APP_URL"), config.AppURL, defaultAppURL)
+	fmt.Printf("Uploaded %s (PENDING APPROVAL)\n", skill.Name)
+	fmt.Printf("  Agent-uploaded skills require workspace owner approval before they\n")
+	fmt.Printf("  become visible to 'skills list', 'skills get', and 'install-codex'.\n")
+	fmt.Printf("  Approve it at %s\n", appURL)
+	fmt.Printf("  Note: re-uploading an already approved skill resets its approval,\n")
+	fmt.Printf("  which removes it from the workspace listing until re-approved.\n")
 }
 
 func discoverSkillFiles(root string) ([]string, error) {
