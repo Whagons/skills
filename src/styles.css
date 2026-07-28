@@ -1675,6 +1675,43 @@ button {
   font-size: 9px;
 }
 
+.credentialRow {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+  padding: 13px;
+}
+
+.credentialIdentity {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.credentialIdentity strong,
+.credentialIdentity span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.credentialIdentity strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.credentialIdentity span {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.credentialRow .rowActions {
+  justify-content: flex-start;
+  padding-top: 10px;
+  border-top: 1px solid #e3dfd5;
+}
+
 .credentialForm {
   display: grid;
   gap: 12px;
@@ -1702,9 +1739,16 @@ button {
   gap: 8px;
 }
 
+.credentialValuePanel {
+  width: 100%;
+  min-width: 0;
+}
+
 .credentialSecret {
   display: block;
-  max-height: 120px;
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 260px;
   overflow: auto;
   padding: 9px 10px;
   border: 1px solid #d8d4ca;
@@ -1712,10 +1756,10 @@ button {
   background: #f4f1e9;
   color: #31332d;
   font-family: ui-monospace, monospace;
-  font-size: 10px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
 }
 
 .apiCode {
@@ -1952,6 +1996,17 @@ html[data-theme="dark"] .keyRow:hover {
 
 html[data-theme="dark"] .keyRow strong {
   color: #e5e7de;
+}
+
+html[data-theme="dark"] .credentialRow .rowActions {
+  border-color: #383a31;
+}
+
+html[data-theme="dark"] .credentialSecret {
+  border-color: #404238;
+  background: #171812;
+  color: #e5e7de;
+  color-scheme: dark;
 }
 
 html[data-theme="dark"] .freshKey {

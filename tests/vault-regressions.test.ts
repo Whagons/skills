@@ -44,6 +44,20 @@ test("credential rows support ID-based editing and protected reveal or copy", as
   assert.match(app, /Hide value|Show value/);
 });
 
+test("credential rows keep identity, revealed values, and actions in readable full-width regions", async () => {
+  const app = await source("src/App.tsx");
+  const styles = await source("src/styles.css");
+
+  assert.match(app, /className="keyRow credentialRow"/);
+  assert.match(app, /className="credentialIdentity"/);
+  assert.match(app, /className="credentialValuePanel"/);
+  assert.match(app, /formatCredentialValue\(credentialSecrets\[credential\.id\]\)/);
+  assert.match(styles, /\.credentialRow\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(styles, /\.credentialRow \.rowActions\s*\{[^}]*justify-content:\s*flex-start/s);
+  assert.match(styles, /\.credentialIdentity strong\s*\{[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(styles, /\.credentialValuePanel\s*\{[^}]*width:\s*100%/s);
+});
+
 test("credential encryption reads the Gonvex project environment from the request context", async () => {
   const backend = await source("gonvex/skills.go");
   assert.match(backend, /ctx\.EnvValue\("SKILLS_SECRET_KEY"\)/);

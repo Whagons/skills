@@ -222,6 +222,18 @@ function shellQuote(value: string) {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
+function formatCredentialValue(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed !== null && typeof parsed === "object") {
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch {
+    // Credentials may be opaque tokens rather than JSON.
+  }
+  return value;
+}
+
 function parseLoopbackCallback(rawCallback: string): URL | null {
   try {
     const url = new URL(rawCallback);
@@ -1332,16 +1344,18 @@ export default function App() {
                     {credentials.length === 0 ? (
                       <span className="mutedText">No project credentials stored.</span>
                     ) : credentials.map((credential) => (
-                      <div className="keyRow" key={credential.id}>
-                        <div>
+                      <div className="keyRow credentialRow" key={credential.id}>
+                        <div className="credentialIdentity">
                           <strong>{credential.name}</strong>
                           <span>{credential.summary || `Updated ${formatDate(credential.updated_at)}`}</span>
-                          {credentialSecrets[credential.id] !== undefined ? (
-                            <code className="credentialSecret" aria-label={`${credential.name} value`}>
-                              {credentialSecrets[credential.id]}
-                            </code>
-                          ) : null}
                         </div>
+                        {credentialSecrets[credential.id] !== undefined ? (
+                          <div className="credentialValuePanel">
+                            <code className="credentialSecret" aria-label={`${credential.name} value`}>
+                              {formatCredentialValue(credentialSecrets[credential.id])}
+                            </code>
+                          </div>
+                        ) : null}
                         <div className="rowActions">
                           <Button
                             type="button"
