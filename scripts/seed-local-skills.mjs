@@ -48,7 +48,7 @@ function devJWT() {
   return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub: "skills-seeder", email: "skills@whagons.local" })}.seed`;
 }
 
-const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex.whagons.com/ws");
+const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex-unified-prod.whagons.com/ws");
 wsURL.searchParams.set("project", process.env.GONVEX_PROJECT_ID || "skills");
 
 const client = new GonvexClient(wsURL.toString(), {

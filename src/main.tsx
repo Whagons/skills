@@ -7,7 +7,7 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { withGonvexProject } from "./lib/gonvex-url";
 import "./styles.css";
 
-const gonvexBaseURL = import.meta.env.VITE_GONVEX_WS_URL ?? "ws://localhost:8080/ws";
+const gonvexBaseURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex-unified-prod.whagons.com/ws";
 const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "skills";
 
 function devJWT() {
