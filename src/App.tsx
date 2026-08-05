@@ -30,7 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../gonvex/_generated/api";
-import { useMutation, useQuery } from "../gonvex/_generated/react";
+import { useConvex, useMutation, useQuery } from "../gonvex/_generated/react";
 import { Avatar, AvatarFallback } from "./components/ui/avatar";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -66,7 +66,7 @@ type APIKeyRecord = {
   prefix: string;
   created_at: string;
   revoked_at?: string | null;
-  expires_at: string;
+  expires_at?: string | null;
   scopes: string[];
 };
 
@@ -133,6 +133,12 @@ type WorkspaceRecord = {
   email: string;
   is_owner: boolean;
   active: boolean;
+};
+
+type InvitationLoad = {
+  status: "idle" | "loading" | "ready" | "error";
+  invitations: WorkspaceInvitation[];
+  error: string;
 };
 
 type ColorTheme = "light" | "dark";
@@ -373,13 +379,16 @@ export default function App() {
   const [freshAPIKey, setFreshAPIKey] = useState("");
   const [apiKeyName, setAPIKeyName] = useState("");
   const [apiKeyScopes, setAPIKeyScopes] = useState<string[]>(readOnlyScopes);
-  const [apiKeyExpiryDays, setAPIKeyExpiryDays] = useState(30);
+  const [apiKeyExpiry, setAPIKeyExpiry] = useState("30");
   const [credentialDraft, setCredentialDraft] = useState<CredentialDraft>(emptyCredentialDraft);
   const [credentialSaving, setCredentialSaving] = useState(false);
   const [credentialSecrets, setCredentialSecrets] = useState<Record<string, string>>({});
   const [credentialLoadingID, setCredentialLoadingID] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [invitationReload, setInvitationReload] = useState(0);
+  const [invitationLoad, setInvitationLoad] = useState<InvitationLoad>({ status: "idle", invitations: [], error: "" });
 
+  const gonvex = useConvex();
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
   const me = useQuery<MeResult>(api.auth.me, protectedArgs) ?? null;
   const activeWorkspaceArgs = sessionToken && me && !me.pending_only ? { sessionToken } : "skip";
@@ -387,7 +396,6 @@ export default function App() {
   const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, activeWorkspaceArgs) ?? [];
   const credentialRecords = useQuery<CredentialMeta[]>(api.credentials.list, activeWorkspaceArgs) ?? [];
   const teamMembers = useQuery<TeamMember[]>(api.team.list, activeWorkspaceArgs) ?? [];
-  const invitations = useQuery<WorkspaceInvitation[]>(api.team.invitations.list, protectedArgs) ?? [];
   const workspaces = useQuery<WorkspaceRecord[]>(api.auth.workspaces, protectedArgs) ?? [];
   const login = useMutation(api.auth.login);
   const logout = useMutation(api.auth.logout);
@@ -420,8 +428,32 @@ export default function App() {
     sessionToken && me && !me.pending_only && selectedSkill ? { sessionToken, id: selectedSkill.id } : "skip",
   ) ?? null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
-  const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && new Date(key.expires_at).getTime() > Date.now());
+  const invitations = invitationLoad.invitations;
+  const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && (!key.expires_at || new Date(key.expires_at).getTime() > Date.now()));
   const credentials = useMemo(() => dedupeCredentials(credentialRecords), [credentialRecords]);
+
+  useEffect(() => {
+    if (!sessionToken) {
+      setInvitationLoad({ status: "idle", invitations: [], error: "" });
+      return;
+    }
+
+    let cancelled = false;
+    setInvitationLoad({ status: "loading", invitations: [], error: "" });
+    void gonvex.query<WorkspaceInvitation[]>(api.team.invitations.list, { sessionToken })
+      .then((result) => {
+        if (!cancelled) setInvitationLoad({ status: "ready", invitations: result, error: "" });
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : "Unknown query error";
+        setInvitationLoad({ status: "error", invitations: [], error: message });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [gonvex, invitationReload, sessionToken]);
 
   function changeVaultTab(tab: VaultTab) {
     setActiveTab(tab);
@@ -577,7 +609,14 @@ export default function App() {
     const name = apiKeyName.trim();
     if (!name) return;
     await runGuarded(async () => {
-      const result = await createAPIKey({ sessionToken, name, scopes: apiKeyScopes, expires_in_days: apiKeyExpiryDays }) as CreateAPIKeyResult;
+      const neverExpires = apiKeyExpiry === "never";
+      const result = await createAPIKey({
+        sessionToken,
+        name,
+        scopes: apiKeyScopes,
+        expires_in_days: neverExpires ? 0 : Number(apiKeyExpiry),
+        never_expires: neverExpires,
+      }) as CreateAPIKeyResult;
       setFreshAPIKey(result.apiKey);
       setAPIKeyName("");
       setNotice(`Created ${result.record.name}`);
@@ -742,6 +781,10 @@ export default function App() {
       if (me?.pending_only) {
         await signOut();
       } else {
+        setInvitationLoad((current) => ({
+          ...current,
+          invitations: current.invitations.filter((item) => item.id !== invitation.id),
+        }));
         setNotice("Invitation rejected");
       }
     });
@@ -878,7 +921,14 @@ export default function App() {
                 <div><p className="eyebrow">Pending invitation</p><CardTitle>Join a workspace?</CardTitle><CardDescription>Accepting grants access to its skills and credentials.</CardDescription></div>
               </CardHeader>
               <CardContent className="apiContent">
-                {invitations.length === 0 ? <span className="mutedText">No active invitation was found. Sign out and ask the owner to invite you again.</span> : invitations.map((invitation) => (
+                {invitationLoad.status === "loading" || invitationLoad.status === "idle" ? (
+                  <span className="mutedText">Loading your invitation…</span>
+                ) : invitationLoad.status === "error" ? (
+                  <div className="invitationError">
+                    <span className="mutedText">Could not load the invitation: {invitationLoad.error}</span>
+                    <Button type="button" variant="outline" onClick={() => setInvitationReload((current) => current + 1)}>Retry</Button>
+                  </div>
+                ) : invitations.length === 0 ? <span className="mutedText">No active invitation was found. Sign out and ask the owner to invite you again.</span> : invitations.map((invitation) => (
                   <div className="keyRow" key={invitation.id}>
                     <div><strong>{invitation.workspace_email || "Whagons workspace"}</strong><span>Invited {formatDate(invitation.created_at)}</span></div>
                     <div className="rowActions">
@@ -1229,10 +1279,11 @@ export default function App() {
                     </fieldset>
                     <label>
                       <span>Expires after</span>
-                      <select value={apiKeyExpiryDays} onChange={(event) => setAPIKeyExpiryDays(Number(event.target.value))}>
+                      <select value={apiKeyExpiry} onChange={(event) => setAPIKeyExpiry(event.target.value)}>
                         <option value={7}>7 days</option>
                         <option value={30}>30 days</option>
                         <option value={90}>90 days</option>
+                        <option value="never">Never expires</option>
                       </select>
                     </label>
                     <Button type="submit" variant="accent" disabled={apiKeyScopes.length === 0}>
@@ -1257,7 +1308,7 @@ export default function App() {
                       <div className="keyRow" key={key.id}>
                         <div>
                           <strong>{key.name}</strong>
-                          <span>{key.prefix}... · Expires {formatDate(key.expires_at)} · {key.scopes.join(", ")}</span>
+                          <span>{key.prefix}... · {key.expires_at ? `Expires ${formatDate(key.expires_at)}` : "Never expires"} · {key.scopes.join(", ")}</span>
                         </div>
                         <Button
                           type="button"

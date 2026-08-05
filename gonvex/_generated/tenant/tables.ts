@@ -16,7 +16,7 @@ export const tables = {
         type: "string",
       },
       expires_at: {
-        nullable: false,
+        nullable: true,
         primaryKey: false,
         type: "time",
       },

@@ -93,7 +93,7 @@ The UI uses Google Identity Services. The browser sends a Google ID token to the
 
 Google-only: there is no password login.
 
-Agents do not use Google directly. They use a scoped API key with a maximum 90-day lifetime (created in the UI or via the CLI browser flow) and call the agent functions:
+Agents do not use Google directly. They use a scoped API key created in the UI or via the CLI browser flow. UI-created keys can expire after 7, 30, or 90 days, or explicitly be created without an expiration; CLI browser-flow keys expire after 30 days. Agents call these functions:
 
 - `agent.skills.list` / `get` / `upload` / `delete` (lists are metadata-only; `get` returns content)
 - `agent.apiKeys.list` / `revoke`
