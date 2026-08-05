@@ -64,6 +64,30 @@ test("credential encryption reads the Gonvex project environment from the reques
   assert.match(backend, /ctx\.EnvValue\("SKILLS_SECRET_KEY_PREVIOUS"\)/);
 });
 
+test("pending invitations distinguish loading and query failures from an empty result", async () => {
+  const app = await source("src/App.tsx");
+
+  assert.doesNotMatch(
+    app,
+    /const invitations = useQuery<WorkspaceInvitation\[\]>\(api\.team\.invitations\.list, protectedArgs\) \?\? \[\]/,
+  );
+  assert.match(app, /invitationLoad\.status === "loading"/);
+  assert.match(app, /invitationLoad\.status === "error"/);
+  assert.match(app, /Could not load (?:the )?invitation/i);
+});
+
+test("workspace API keys can explicitly opt out of expiration", async () => {
+  const app = await source("src/App.tsx");
+  const backend = await source("gonvex/skills.go");
+  const schema = await source("gonvex/schema.go");
+
+  assert.match(app, /<option value="never">Never expires<\/option>/);
+  assert.match(app, /Never expires/);
+  assert.match(backend, /NeverExpires\s+bool\s+`json:"never_expires"`/);
+  assert.match(backend, /expires_at is null or expires_at > now\(\)/);
+  assert.match(schema, /t\.Time\("expires_at", gonvex\.Nullable\)/);
+});
+
 test("the credential vault collapses legacy duplicate metadata before rendering", async () => {
   const app = await source("src/App.tsx");
   assert.match(app, /dedupeCredentials\(credentialRecords\)/);

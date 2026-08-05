@@ -154,6 +154,7 @@ type CreateAPIKeyArgs struct {
 	Name          string   `json:"name"`
 	Scopes        []string `json:"scopes"`
 	ExpiresInDays int      `json:"expires_in_days"`
+	NeverExpires  bool     `json:"never_expires"`
 }
 
 type RevokeAPIKeyArgs struct {
@@ -230,7 +231,7 @@ type APIKeyRecord struct {
 	Prefix    string     `json:"prefix"`
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-	ExpiresAt time.Time  `json:"expires_at"`
+	ExpiresAt *time.Time `json:"expires_at"`
 	Scopes    []string   `json:"scopes"`
 	CreatedBy string     `json:"created_by,omitempty"`
 }
@@ -878,10 +879,10 @@ func CreateAPIKey(ctx *gonvex.MutationCtx, args CreateAPIKeyArgs) (CreateAPIKeyR
 	if identity.PendingOnly {
 		return CreateAPIKeyResult{}, errors.New("accept or reject the pending workspace invitation first")
 	}
-	return createAPIKey(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, identity.OwnerID, args.Name, args.Scopes, args.ExpiresInDays)
+	return createAPIKey(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, identity.OwnerID, args.Name, args.Scopes, args.ExpiresInDays, args.NeverExpires)
 }
 
-func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, createdBy string, keyName string, requestedScopes []string, expiresInDays int) (CreateAPIKeyResult, error) {
+func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, createdBy string, keyName string, requestedScopes []string, expiresInDays int, neverExpires bool) (CreateAPIKeyResult, error) {
 	name := strings.TrimSpace(keyName)
 	if name == "" {
 		name = "Agent key"
@@ -896,7 +897,7 @@ func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, creat
 		return CreateAPIKeyResult{}, errors.New("api key name contains control characters")
 	}
 	var activeKeys int
-	if err := runner.QueryRowContext(ctx, `select count(*) from skill_api_keys where owner_id = $1 and revoked_at is null and expires_at > now()`, ownerID).Scan(&activeKeys); err != nil {
+	if err := runner.QueryRowContext(ctx, `select count(*) from skill_api_keys where owner_id = $1 and revoked_at is null and (expires_at is null or expires_at > now())`, ownerID).Scan(&activeKeys); err != nil {
 		return CreateAPIKeyResult{}, err
 	}
 	if activeKeys >= maxWorkspaceKeys {
@@ -909,13 +910,18 @@ func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, creat
 	if len(scopes) == 0 {
 		scopes = []string{scopeSkillsRead}
 	}
-	maxDays := int(maxAPIKeyTTL / (24 * time.Hour))
-	if expiresInDays < 0 || expiresInDays > maxDays {
-		return CreateAPIKeyResult{}, fmt.Errorf("api keys may expire at most %d days from creation", maxDays)
-	}
-	ttl := defaultAPIKeyTTL
-	if expiresInDays > 0 {
-		ttl = time.Duration(expiresInDays) * 24 * time.Hour
+	var expiresAt *time.Time
+	if !neverExpires {
+		maxDays := int(maxAPIKeyTTL / (24 * time.Hour))
+		if expiresInDays < 0 || expiresInDays > maxDays {
+			return CreateAPIKeyResult{}, fmt.Errorf("api keys may expire at most %d days from creation", maxDays)
+		}
+		ttl := defaultAPIKeyTTL
+		if expiresInDays > 0 {
+			ttl = time.Duration(expiresInDays) * 24 * time.Hour
+		}
+		value := time.Now().UTC().Add(ttl)
+		expiresAt = &value
 	}
 	id, err := randomID()
 	if err != nil {
@@ -930,7 +936,6 @@ func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, creat
 		prefix = prefix[:14]
 	}
 	now := time.Now().UTC()
-	expiresAt := now.Add(ttl)
 	_, err = runner.ExecContext(ctx, `
 		insert into skill_api_keys (id, owner_id, created_by, name, key_hash, prefix, scopes, created_at, expires_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1164,7 +1169,7 @@ func AgentRevokeSelf(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResult
 	}
 	result, err := mutationRunner(ctx).ExecContext(ctx.Context, `
 		update skill_api_keys set revoked_at = now()
-		where key_hash = $1 and revoked_at is null and expires_at > now()
+		where key_hash = $1 and revoked_at is null and (expires_at is null or expires_at > now())
 	`, hashToken(apiKey))
 	if err != nil {
 		return DeleteResult{}, err
@@ -1594,7 +1599,7 @@ func ensureTables(ctx context.Context, db execer) error {
 			prefix text not null,
 			scopes text not null default 'skills:read,skills:write,credentials:read,credentials:write,keys:read,keys:revoke',
 			created_at timestamptz not null default now(),
-			expires_at timestamptz not null default (now() + interval '30 days'),
+			expires_at timestamptz default (now() + interval '30 days'),
 			revoked_at timestamptz
 		)`,
 		`create table if not exists skill_sessions (
@@ -1641,6 +1646,7 @@ func ensureTables(ctx context.Context, db execer) error {
 		`alter table skill_api_keys add column if not exists created_by text not null default ''`,
 		`alter table skill_api_keys add column if not exists scopes text not null default 'skills:read,skills:write,credentials:read,credentials:write,keys:read,keys:revoke'`,
 		`alter table skill_api_keys add column if not exists expires_at timestamptz not null default (now() + interval '30 days')`,
+		`alter table skill_api_keys alter column expires_at drop not null`,
 		`alter table skill_sessions add column if not exists owner_id text not null default ''`,
 		`alter table skill_sessions add column if not exists workspace_id text not null default ''`,
 		`alter table skill_sessions add column if not exists pending_only boolean not null default false`,
@@ -1767,7 +1773,7 @@ func verifyAPIKey(ctx context.Context, db *sql.DB, apiKey string, requiredScope 
 	err := db.QueryRowContext(ctx, `
 		select owner_id, created_by, scopes
 		from skill_api_keys
-		where key_hash = $1 and revoked_at is null and expires_at > now()
+		where key_hash = $1 and revoked_at is null and (expires_at is null or expires_at > now())
 		limit 1
 	`, hashToken(apiKey)).Scan(&ownerID, &createdBy, &scopes)
 	if err != nil {

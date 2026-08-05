@@ -39,7 +39,7 @@ func Schema(s *gonvex.Schema) {
 		t.String("prefix")
 		t.String("scopes")
 		t.Time("created_at")
-		t.Time("expires_at")
+		t.Time("expires_at", gonvex.Nullable)
 		t.Time("revoked_at", gonvex.Nullable)
 
 		t.Index("by_key_hash", "key_hash")

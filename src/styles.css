@@ -1506,6 +1506,12 @@ button {
   padding-top: 18px;
 }
 
+.invitationError {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+
 .apiKeyCreateForm {
   display: grid;
   grid-template-columns: minmax(220px, 1fr);
