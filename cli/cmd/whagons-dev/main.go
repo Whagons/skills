@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	defaultWSURL            = "wss://gonvex-unified-prod.whagons.com/ws"
+	defaultWSURL            = "wss://gonvex-unified-dev.whagons.com/ws"
 	defaultProject          = "skills"
 	defaultAppURL           = "https://skills.whagons.com/"
 	maxSkillBytes           = 2 << 20

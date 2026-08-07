@@ -43,7 +43,7 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex-unified-prod.whagons.com/ws");
+const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex-unified-dev.whagons.com/ws");
 wsURL.searchParams.set("project", process.env.VITE_GONVEX_PROJECT_ID || "skills");
 
 const client = new GonvexClient(wsURL.toString(), {

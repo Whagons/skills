@@ -3,16 +3,16 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { withGonvexProject } from "../src/lib/gonvex-url.ts";
 
-const productionRuntime = "gonvex-unified-prod.whagons.com";
+const developmentRuntime = "gonvex-unified-dev.whagons.com";
 
 test("routes the websocket to the synced Gonvex project", () => {
   assert.equal(
-    withGonvexProject(`wss://${productionRuntime}/ws`, "skills"),
-    `wss://${productionRuntime}/ws?project=skills`,
+    withGonvexProject(`wss://${developmentRuntime}/ws`, "skills"),
+    `wss://${developmentRuntime}/ws?project=skills`,
   );
 });
 
-test("all production runtime defaults use the unified Gonvex host", async () => {
+test("all runtime defaults use the unified development Gonvex host", async () => {
   for (const path of [
     ".env.example",
     "Dockerfile",
@@ -23,7 +23,7 @@ test("all production runtime defaults use the unified Gonvex host", async () => 
     "cli/cmd/whagons-dev/main.go",
   ]) {
     const contents = await readFile(new URL(`../${path}`, import.meta.url), "utf8");
-    assert.match(contents, new RegExp(productionRuntime.replaceAll(".", "\\.")), path);
-    assert.doesNotMatch(contents, /(?<!unified-prod\.)gonvex\.whagons\.com/, path);
+    assert.match(contents, new RegExp(developmentRuntime.replaceAll(".", "\\.")), path);
+    assert.doesNotMatch(contents, /gonvex-unified-prod\.whagons\.com/, path);
   }
 });
