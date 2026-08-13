@@ -48,12 +48,12 @@ function devJWT() {
   return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub: "skills-seeder", email: "skills@whagons.local" })}.seed`;
 }
 
-const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex-unified-dev.whagons.com/ws");
-wsURL.searchParams.set("project", process.env.GONVEX_PROJECT_ID || "skills");
+const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex.whagons.com/ws");
+wsURL.searchParams.set("project", process.env.GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192");
 
 const client = new GonvexClient(wsURL.toString(), {
   token: devJWT(),
-  tenant: process.env.GONVEX_PROJECT_ID || "skills",
+  tenant: process.env.GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
 });
 
 const saveRef = { kind: "mutation", path: "agent.skills.upload" };

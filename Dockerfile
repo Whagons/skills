@@ -9,8 +9,8 @@ RUN npm install --global pnpm@11.10.0 \
 
 # Vite inlines VITE_* at build time, so they must arrive as build args
 # (e.g. docker build --build-arg VITE_GOOGLE_CLIENT_ID=...).
-ARG VITE_GONVEX_WS_URL=wss://gonvex-unified-dev.whagons.com/ws
-ARG VITE_GONVEX_PROJECT_ID=skills
+ARG VITE_GONVEX_WS_URL=wss://gonvex.whagons.com/ws
+ARG VITE_GONVEX_PROJECT_ID=01f1974b-dcda-6fc3-b16d-9acf5f3b4192
 ARG VITE_GOOGLE_CLIENT_ID=
 ENV VITE_GONVEX_WS_URL=$VITE_GONVEX_WS_URL \
     VITE_GONVEX_PROJECT_ID=$VITE_GONVEX_PROJECT_ID \
