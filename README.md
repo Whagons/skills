@@ -9,7 +9,7 @@ go install github.com/whagons/skills/cli/cmd/whagons-dev@latest
 whagons-dev setup
 ```
 
-That's it. On first use the CLI opens https://skills.whagons.com in the browser; sign in with Google and click **Authorize CLI**. `setup` then:
+That's it. On first use the CLI opens https://skills.whagons.com in the browser; sign in with Google and click **Authorize CLI**. The CLI receives a scoped one-year key and stores it itself in the private `~/.whagons-dev/config.json` file; a model does not need to copy or save it. `setup` then:
 
 - stores signed canonical skills in `~/.whagons-dev/skills`,
 - links them into the compatible agents detected on the machine,
@@ -43,6 +43,8 @@ The stdin flow keeps the key out of shell history. Avoid exporting long-lived ke
 
 All data (skills, credentials, API keys) belongs to a **workspace**, owned by the Google account that created it. From the **Team** tab in the UI, the workspace owner can invite other Google emails. Invited members:
 
+- do not receive an automatic email, so the owner copies and sends the sign-in instructions shown beside a pending invite,
+- must use the exact Google email address entered by the owner,
 - sign in with their own Google account and explicitly accept the invitation,
 - see and manage all skills, credentials, and API keys in the owner's workspace,
 - lose access immediately when removed (their active sessions and keys are revoked).
@@ -107,7 +109,7 @@ The UI uses Google Identity Services. The browser sends a Google ID token to the
 
 Google-only: there is no password login.
 
-Agents do not use Google directly. They use a scoped API key created in the UI or via the CLI browser flow. UI-created keys can expire after 7, 30, or 90 days, or explicitly be created without an expiration; CLI browser-flow keys expire after 30 days. Agents call these functions:
+Agents do not use Google directly. They use a scoped API key created in the UI or via the CLI browser flow. UI-created keys can expire after 7, 30, 90, or 365 days, or explicitly be created without an expiration; CLI browser-flow keys expire after 365 days. Agents call these functions:
 
 - `agent.skills.list` / `get` / `upload` / `delete` (lists are metadata-only; `get` returns content)
 - `agent.apiKeys.list` / `revoke`
@@ -129,7 +131,7 @@ This workspace keeps the current operator-side rotation copy in the ignored `.sk
 
 ### CLI authorization flow
 
-`whagons-dev` starts a loopback HTTP server on `127.0.0.1`, opens the vault with `?cli_callback=...&cli_state=...`, and waits. After Google login the UI validates the exact callback shape, mints a 30-day CLI key, and sends a state-bound JSON `POST`. The listener permits only the exact vault origin and the key never appears in a URL or browser history. If delivery or key verification fails, the new key is revoked or discarded.
+`whagons-dev` starts a loopback HTTP server on `127.0.0.1`, opens the vault with `?cli_callback=...&cli_state=...`, and waits. After Google login the UI validates the exact callback shape, mints a 365-day CLI key, and sends a state-bound JSON `POST`. The listener permits only the exact vault origin and the key never appears in a URL or browser history. The CLI verifies the key before atomically saving it to a mode-`0600` config file. If delivery or verification fails, the new key is revoked or discarded.
 
 ## CLI reference
 

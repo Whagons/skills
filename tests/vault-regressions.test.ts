@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { dedupeCredentials } from "../src/lib/credentials.ts";
+import { invitationInstructions } from "../src/lib/invitations.ts";
 import { readVaultTab, vaultURLForTab, vaultURLWithoutCLIAuth } from "../src/lib/vault-state.ts";
 
 async function source(path: string) {
@@ -74,6 +75,15 @@ test("pending invitations distinguish loading and query failures from an empty r
   assert.match(app, /invitationLoad\.status === "loading"/);
   assert.match(app, /invitationLoad\.status === "error"/);
   assert.match(app, /Could not load (?:the )?invitation/i);
+});
+
+test("invite instructions name the exact Google account and acceptance steps", () => {
+  const message = invitationInstructions("Teammate@Example.com", "https://skills.whagons.com");
+
+  assert.match(message, /teammate@example\.com/);
+  assert.match(message, /https:\/\/skills\.whagons\.com/);
+  assert.match(message, /Sign in with Google/);
+  assert.match(message, /Accept the workspace invitation/);
 });
 
 test("workspace API keys can explicitly opt out of expiration", async () => {

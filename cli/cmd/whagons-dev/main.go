@@ -115,9 +115,8 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		usage()
-		return nil
+	if handled, err := handleHelpRequest(args); handled {
+		return err
 	}
 	group := args[0]
 	command := ""
@@ -167,50 +166,7 @@ func run(args []string) error {
 }
 
 func usage() {
-	fmt.Print(`whagons-dev — Whagons developer CLI for the Skills Vault
-
-Usage:
-  whagons-dev setup [--targets all|LIST] [--no-startup] [--interval DURATION]
-  whagons-dev --update
-  whagons-dev update
-  whagons-dev self-update
-  whagons-dev startup install|status|remove
-  whagons-dev daemon [--interval DURATION] [--once]
-  whagons-dev auth login [--app-url URL]
-  whagons-dev auth set-key --stdin        (pipe a key minted in the vault UI)
-  whagons-dev auth status
-  whagons-dev auth logout [--local-only]
-  whagons-dev skills list
-  whagons-dev skills get <name-or-id> [--output FILE]
-  whagons-dev skills copy <name-or-id>
-  whagons-dev skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
-  whagons-dev skills sync <DIR>
-  whagons-dev skills install [--targets all|LIST]
-  whagons-dev skills update
-  whagons-dev skills status
-  whagons-dev skills install-codex [--dir DIR]
-  whagons-dev skills update-codex [--dir DIR]
-  whagons-dev skills delete <name-or-id>
-  whagons-dev api-keys list
-  whagons-dev api-keys revoke <id>
-  whagons-dev credentials list
-  whagons-dev credentials set <name> [--summary TEXT] [--value-stdin]
-  whagons-dev credentials delete <id>
-  whagons-dev credentials exec <name> [--via file|stdin|env] [--prefix PREFIX]
-      [--inherit-env NAME[,NAME...]] -- <command> [args...]
-
-What it does:
-  - Keeps signed canonical skills in ~/.whagons-dev/skills and links them into supported agents.
-  - Can run a lightweight background sync at login and safely prune deleted managed skills.
-  - Updates itself with --update (and automatically from the background service).
-  - Authenticates itself by opening the Skills Vault in your browser (automatic on first use).
-  - Lists, copies, uploads, and deletes your workspace's cloud skills.
-  - Installs or updates cloud skills for Codex, T3, Claude, Cursor, and OpenCode.
-  - Stores project credentials and injects them into child processes without printing them.
-
-Secrets are not printed by default. Credential files are mode 0600 and deleted after the child exits.
-Child processes receive a minimal environment; opt in to additional non-secret variables with --inherit-env.
-`)
+	_ = printHelp(nil)
 }
 
 func runAuth(command string, args []string) error {
@@ -833,7 +789,7 @@ func browserLogin(appURL string) error {
 	q.Set("cli_name", "Whagons Dev CLI")
 	loginURL.RawQuery = q.Encode()
 	fmt.Printf("Opening browser: %s\n", loginURL.String())
-	fmt.Println("Sign in with Google, then click \"Authorize CLI\".")
+	fmt.Println("Sign in with Google, then click \"Authorize CLI\" for one year of access.")
 	if err := openBrowser(loginURL.String()); err != nil {
 		fmt.Printf("Open this URL manually: %s\n", loginURL.String())
 	}

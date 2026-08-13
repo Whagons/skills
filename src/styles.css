@@ -1653,6 +1653,21 @@ button {
   min-width: 0;
 }
 
+.memberHeading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.memberHeading strong {
+  min-width: 0;
+}
+
+.memberHeading .ui-badge {
+  flex: 0 0 auto;
+}
+
 .keyRow .rowActions {
   display: flex;
   flex-wrap: wrap;

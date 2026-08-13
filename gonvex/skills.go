@@ -29,7 +29,7 @@ import (
 const (
 	sessionTTL              = 30 * 24 * time.Hour
 	defaultAPIKeyTTL        = 30 * 24 * time.Hour
-	maxAPIKeyTTL            = 90 * 24 * time.Hour
+	maxAPIKeyTTL            = 365 * 24 * time.Hour
 	maxSkillContentBytes    = 2 << 20
 	maxCredentialValueSize  = 256 << 10
 	maxNameLength           = 120
@@ -115,6 +115,7 @@ type TeamMember struct {
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
 	CreatedAt time.Time `json:"created_at"`
+	Status    string    `json:"status"`
 }
 
 type SaveSkillArgs struct {
@@ -524,11 +525,19 @@ func ListTeamMembers(ctx *gonvex.QueryCtx, args SessionArgs) ([]TeamMember, erro
 		return nil, errors.New("accept or reject the pending workspace invitation first")
 	}
 	rows, err := ctx.DB.QueryContext(ctx.Context, `
-		select id, email, created_at
-		from skill_workspace_members
-		where workspace_owner_id = $1
+		select id, email, created_at, status from (
+			select id, email, created_at, 'active'::text as status
+			from skill_workspace_members
+			where workspace_owner_id = $1
+			union all
+			select id, email, created_at, 'pending'::text as status
+			from skill_workspace_invitations
+			where workspace_owner_id = $1
+				and accepted_at is null and rejected_at is null
+				and $2
+		) workspace_people
 		order by created_at desc
-	`, identity.WorkspaceID)
+	`, identity.WorkspaceID, identity.IsWorkspaceOwner())
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +545,7 @@ func ListTeamMembers(ctx *gonvex.QueryCtx, args SessionArgs) ([]TeamMember, erro
 	members := []TeamMember{}
 	for rows.Next() {
 		var member TeamMember
-		if err := rows.Scan(&member.ID, &member.Email, &member.CreatedAt); err != nil {
+		if err := rows.Scan(&member.ID, &member.Email, &member.CreatedAt, &member.Status); err != nil {
 			return nil, err
 		}
 		members = append(members, member)
@@ -592,7 +601,7 @@ func InviteTeamMember(ctx *gonvex.MutationCtx, args InviteMemberArgs) (TeamMembe
 	if err != nil {
 		return TeamMember{}, err
 	}
-	return TeamMember{ID: id, Email: email, CreatedAt: now}, nil
+	return TeamMember{ID: id, Email: email, CreatedAt: now, Status: "pending"}, nil
 }
 
 func ListInvitations(ctx *gonvex.QueryCtx, args SessionArgs) ([]WorkspaceInvitation, error) {
@@ -682,7 +691,7 @@ func AcceptInvitation(ctx *gonvex.MutationCtx, args InvitationArgs) (TeamMember,
 	`, invitation.WorkspaceID, hashToken(args.SessionToken), identity.OwnerID); err != nil {
 		return TeamMember{}, err
 	}
-	return TeamMember{ID: memberID, Email: invitation.Email, CreatedAt: time.Now().UTC()}, nil
+	return TeamMember{ID: memberID, Email: invitation.Email, CreatedAt: time.Now().UTC(), Status: "active"}, nil
 }
 
 func RejectInvitation(ctx *gonvex.MutationCtx, args InvitationArgs) (DeleteResult, error) {
@@ -721,15 +730,44 @@ func RemoveTeamMember(ctx *gonvex.MutationCtx, args RemoveMemberArgs) (DeleteRes
 		return DeleteResult{}, errors.New("member id is required")
 	}
 	runner := mutationRunner(ctx)
-	var email string
+	var email, status string
 	err = runner.QueryRowContext(ctx.Context, `
-		select email from skill_workspace_members where workspace_owner_id = $1 and id = $2
-	`, identity.WorkspaceID, id).Scan(&email)
+		select email, status from (
+			select email, 'active'::text as status
+			from skill_workspace_members where workspace_owner_id = $1 and id = $2
+			union all
+			select email, 'pending'::text as status
+			from skill_workspace_invitations
+			where workspace_owner_id = $1 and id = $2
+				and accepted_at is null and rejected_at is null
+		) workspace_people
+		limit 1
+	`, identity.WorkspaceID, id).Scan(&email, &status)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return DeleteResult{Deleted: false}, nil
 		}
 		return DeleteResult{}, err
+	}
+	if status == "pending" {
+		if _, err := runner.ExecContext(ctx.Context, `
+			delete from skill_workspace_invitations
+			where workspace_owner_id = $1 and id = $2
+				and accepted_at is null and rejected_at is null
+		`, identity.WorkspaceID, id); err != nil {
+			return DeleteResult{}, err
+		}
+		// Someone may already have signed in and be reviewing this invitation.
+		// Revoke that pending-only session when the owner cancels access.
+		if _, err := runner.ExecContext(ctx.Context, `
+			update skill_sessions set revoked_at = now()
+			where revoked_at is null and pending_only
+				and workspace_id = $1
+				and owner_id in (select owner_id from skill_users where lower(email) = lower($2))
+		`, identity.WorkspaceID, email); err != nil {
+			return DeleteResult{}, err
+		}
+		return DeleteResult{Deleted: true}, nil
 	}
 	if _, err := runner.ExecContext(ctx.Context, `
 		delete from skill_workspace_members where workspace_owner_id = $1 and id = $2
