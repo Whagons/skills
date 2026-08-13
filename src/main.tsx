@@ -7,8 +7,8 @@ import { TooltipProvider } from "./components/ui/tooltip";
 import { withGonvexProject } from "./lib/gonvex-url";
 import "./styles.css";
 
-const gonvexBaseURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex-unified-dev.whagons.com/ws";
-const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "skills";
+const gonvexBaseURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex.whagons.com/ws";
+const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "01f1974b-dcda-6fc3-b16d-9acf5f3b4192";
 
 function devJWT() {
   const encode = (value: object) => btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");

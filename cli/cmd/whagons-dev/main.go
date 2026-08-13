@@ -27,9 +27,11 @@ import (
 )
 
 const (
-	defaultWSURL            = "wss://gonvex-unified-dev.whagons.com/ws"
-	defaultProject          = "skills"
+	defaultWSURL            = "wss://gonvex.whagons.com/ws"
+	defaultProject          = "01f1974b-dcda-6fc3-b16d-9acf5f3b4192"
 	defaultAppURL           = "https://skills.whagons.com/"
+	legacyDefaultWSURL      = "wss://gonvex-unified-dev.whagons.com/ws"
+	legacyDefaultProject    = "skills"
 	maxSkillBytes           = 2 << 20
 	maxCredentialInputBytes = 256 << 10
 )
@@ -829,7 +831,29 @@ func readConfig() (Config, error) {
 		data = legacy
 	}
 	var config Config
-	return config, json.Unmarshal(data, &config)
+	if err := json.Unmarshal(data, &config); err != nil {
+		return Config{}, err
+	}
+	if migrateLegacyRuntime(&config) {
+		if err := writeConfig(config); err != nil {
+			return Config{}, fmt.Errorf("migrate CLI runtime configuration: %w", err)
+		}
+	}
+	return config, nil
+}
+
+// migrateLegacyRuntime moves only the exact former Skills Vault defaults. A
+// custom runtime or project remains user-owned and is never rewritten.
+func migrateLegacyRuntime(config *Config) bool {
+	if config == nil || strings.TrimSuffix(config.WSURL, "/") != legacyDefaultWSURL {
+		return false
+	}
+	if project := strings.TrimSpace(config.Project); project != "" && project != legacyDefaultProject {
+		return false
+	}
+	config.WSURL = defaultWSURL
+	config.Project = defaultProject
+	return true
 }
 
 func writeConfig(config Config) error {

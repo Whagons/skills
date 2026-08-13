@@ -43,12 +43,12 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex-unified-dev.whagons.com/ws");
-wsURL.searchParams.set("project", process.env.VITE_GONVEX_PROJECT_ID || "skills");
+const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex.whagons.com/ws");
+wsURL.searchParams.set("project", process.env.VITE_GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192");
 
 const client = new GonvexClient(wsURL.toString(), {
   token: devJWT(),
-  tenant: process.env.VITE_GONVEX_PROJECT_ID || "skills",
+  tenant: process.env.VITE_GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
 });
 
 try {

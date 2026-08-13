@@ -31,6 +31,24 @@ func TestWriteConfigRepairsExistingPermissions(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyRuntimeOnlyRewritesFormerDefaults(t *testing.T) {
+	legacy := Config{WSURL: legacyDefaultWSURL, Project: legacyDefaultProject}
+	if !migrateLegacyRuntime(&legacy) {
+		t.Fatal("expected former Skills Vault defaults to migrate")
+	}
+	if legacy.WSURL != defaultWSURL || legacy.Project != defaultProject {
+		t.Fatalf("migrated runtime = %q project = %q", legacy.WSURL, legacy.Project)
+	}
+
+	custom := Config{WSURL: "wss://example.test/ws", Project: "personal"}
+	if migrateLegacyRuntime(&custom) {
+		t.Fatal("custom runtime must remain user-owned")
+	}
+	if custom.WSURL != "wss://example.test/ws" || custom.Project != "personal" {
+		t.Fatalf("custom configuration changed: %#v", custom)
+	}
+}
+
 func TestDiscoverSkillFilesRejectsSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation is not consistently available on Windows")

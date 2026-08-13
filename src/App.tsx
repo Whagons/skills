@@ -193,8 +193,8 @@ function readPreferredTheme(): ColorTheme {
 function isInvalidSessionError(error: unknown) {
   return error instanceof Error && /invalid session|session token is required/i.test(error.message);
 }
-const gonvexWSURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex-unified-dev.whagons.com/ws";
-const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "skills";
+const gonvexWSURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex.whagons.com/ws";
+const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "01f1974b-dcda-6fc3-b16d-9acf5f3b4192";
 const googleClientID = import.meta.env.VITE_GOOGLE_CLIENT_ID
   ?? "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com";
 
@@ -270,9 +270,9 @@ const token = \`\${encode({ alg: "none", typ: "JWT" })}.\${encode({
   email: "agent@whagons.local",
 })}.agent\`;
 
-const client = new GonvexClient("wss://gonvex-unified-dev.whagons.com/ws?project=skills", {
+const client = new GonvexClient("wss://gonvex.whagons.com/ws?project=01f1974b-dcda-6fc3-b16d-9acf5f3b4192", {
   token,
-  tenant: "skills",
+  tenant: "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
 });
 
 const apiKey = process.env.WHAGONS_DEV_API_KEY;
@@ -898,7 +898,7 @@ export default function App() {
 
           <div className="authStoryFooter">
             <span><i className="statusDot" /> Gonvex runtime</span>
-            <span>gonvex-unified-dev.whagons.com</span>
+            <span>gonvex.whagons.com</span>
           </div>
         </section>
 

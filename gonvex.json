@@ -1,6 +1,6 @@
 {
-  "project": "skills",
-  "runtime": "https://gonvex-unified-dev.whagons.com",
+  "project": "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
+  "runtime": "https://gonvex.whagons.com",
   "backendDir": "gonvex",
   "generatedDir": "gonvex/_generated",
   "tenantMode": "single"
