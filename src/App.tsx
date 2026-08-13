@@ -39,6 +39,7 @@ import { Input } from "./components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip";
 import { getAuthErrorMessage } from "./lib/auth-error";
 import { dedupeCredentials } from "./lib/credentials";
+import { invitationInstructions } from "./lib/invitations";
 import {
   readVaultTab,
   vaultURLForSkill,
@@ -118,6 +119,7 @@ type TeamMember = {
   id: string;
   email: string;
   created_at: string;
+  status: "active" | "pending";
 };
 
 type WorkspaceInvitation = {
@@ -147,6 +149,7 @@ const sessionStorageKey = "whagons-skills-vault-session";
 const themeStorageKey = "whagons-skills-vault-theme";
 const readOnlyScopes = ["skills:read"];
 const cliScopes = ["skills:read", "skills:write", "credentials:read", "credentials:write", "keys:read", "keys:revoke"];
+const cliAPIKeyLifetimeDays = 365;
 const emptyCredentialDraft: CredentialDraft = { id: "", name: "", summary: "", value: "" };
 
 type StoredSession = {
@@ -438,6 +441,8 @@ export default function App() {
   ) ?? null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
   const invitations = invitationLoad.invitations;
+  const activeTeamMembers = teamMembers.filter((member) => member.status !== "pending");
+  const pendingTeamMembers = teamMembers.filter((member) => member.status === "pending");
   const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && (!key.expires_at || new Date(key.expires_at).getTime() > Date.now()));
   const credentials = useMemo(() => dedupeCredentials(credentialRecords), [credentialRecords]);
 
@@ -648,7 +653,7 @@ export default function App() {
       sessionToken,
       name: `${request.name} ${new Date().toLocaleString()}`,
       scopes: cliScopes,
-      expires_in_days: 30,
+      expires_in_days: cliAPIKeyLifetimeDays,
     }) as CreateAPIKeyResult;
     const payload = {
       api_key: result.apiKey,
@@ -693,14 +698,21 @@ export default function App() {
     await runGuarded(async () => {
       await inviteMember({ sessionToken, email }) as TeamMember;
       setInviteEmail("");
-      setNotice(`Invited ${email}`);
+      setNotice(`Invitation created for ${email}. Copy and send the sign-in instructions.`);
     });
+  }
+
+  async function copyInvitation(member: TeamMember) {
+    await copyText(
+      invitationInstructions(member.email, window.location.origin),
+      `Copied invitation instructions for ${member.email}`,
+    );
   }
 
   async function dropMember(member: TeamMember) {
     await runGuarded(async () => {
       await removeMember({ sessionToken, id: member.id });
-      setNotice(`Removed ${member.email}`);
+      setNotice(member.status === "pending" ? `Cancelled invitation for ${member.email}` : `Removed ${member.email}`);
     });
   }
 
@@ -885,7 +897,7 @@ export default function App() {
                   <p className="eyebrow">Protected workspace</p>
                   <CardTitle>Enter the vault</CardTitle>
                   <CardDescription>
-                    {cliAuthRequest ? `Sign in to authorize ${cliAuthRequest.name}.` : "Continue with your approved Google account."}
+                    {cliAuthRequest ? `Sign in to authorize ${cliAuthRequest.name}.` : "Continue with your approved or invited Google account."}
                   </CardDescription>
                 </div>
               </CardHeader>
@@ -893,6 +905,7 @@ export default function App() {
                 <div className="authForm">
                   <div className="googleButtonHost" ref={googleButtonRef} aria-label="Sign in with Google" />
                   {authError ? <div className="authError">{authError}</div> : null}
+                  {!cliAuthRequest ? <span className="mutedText">Invited? Use the exact Google email address the workspace owner entered.</span> : null}
                 </div>
                 <div className="authTrustRow">
                   <ShieldCheck size={16} />
@@ -1043,7 +1056,7 @@ export default function App() {
             <strong>
               {activeTab === "apiKeys" ? `${activeAPIKeys.length} active keys`
                 : activeTab === "credentials" ? `${credentials.length} credentials`
-                : `${teamMembers.length} invited members`}
+                : `${activeTeamMembers.length} active · ${pendingTeamMembers.length} pending`}
             </strong>
             <span>
               {activeTab === "apiKeys" ? "Create and revoke agent access."
@@ -1102,7 +1115,7 @@ export default function App() {
               <p className="eyebrow">CLI authorization request</p>
               <h3>Connect {cliAuthRequest.name}</h3>
               {cliCallbackURL ? (
-                <p>Create a workspace API key and send it to <code>{cliCallbackURL.origin}</code> on this machine.</p>
+                <p>Create a scoped key valid for one year and send it to <code>{cliCallbackURL.origin}</code> on this machine.</p>
               ) : (
                 <p className="authError">Blocked: callback {cliAuthRequest.callback} is not a local (127.0.0.1) address, so it cannot be a CLI on this machine.</p>
               )}
@@ -1127,6 +1140,19 @@ export default function App() {
                 <X size={16} />
               </Button>
             </div>
+          </div>
+        ) : null}
+        {!cliAuthRequest && invitations.length > 0 && activeTab !== "team" ? (
+          <div className="cliAuthBanner">
+            <div className="cliAuthIcon"><Users size={21} /></div>
+            <div className="cliAuthCopy">
+              <p className="eyebrow">Workspace invitation</p>
+              <h3>{invitations.length === 1 ? "A workspace is waiting" : `${invitations.length} workspaces are waiting`}</h3>
+              <p>Review who invited you before accepting access to shared skills and credentials.</p>
+            </div>
+            <Button type="button" variant="accent" onClick={() => changeVaultTab("team")}>
+              Review invitation
+            </Button>
           </div>
         ) : null}
         {activeTab === "skills" && selectedSkill ? (
@@ -1292,6 +1318,7 @@ export default function App() {
                         <option value={7}>7 days</option>
                         <option value={30}>30 days</option>
                         <option value={90}>90 days</option>
+                        <option value={365}>1 year</option>
                         <option value="never">Never expires</option>
                       </select>
                     </label>
@@ -1482,7 +1509,7 @@ export default function App() {
                 <h2>Team</h2>
                 <p className="summaryLine">
                   {isWorkspaceOwner
-                    ? "Invite Whagons teammates by Google email. They sign in with Google and see all skills and credentials in this workspace."
+                    ? "Invite teammates by their exact Google email, then send them the sign-in instructions. They explicitly accept before gaining access."
                     : `You are a member of ${me?.workspace_email || "this workspace"}. Only the workspace owner can manage members.`}
                 </p>
               </div>
@@ -1535,7 +1562,7 @@ export default function App() {
                 <Card className="settingsCard">
                   <CardHeader>
                     <div className="settingsIcon"><Plus size={19} /></div>
-                    <div><CardTitle>Invite a teammate</CardTitle><CardDescription>Grant full workspace access by Google email.</CardDescription></div>
+                    <div><CardTitle>Invite a teammate</CardTitle><CardDescription>Create access for one exact Google account.</CardDescription></div>
                   </CardHeader>
                   <CardContent className="apiContent">
                     <form className="credentialForm" onSubmit={(event) => void submitInvite(event)}>
@@ -1546,7 +1573,7 @@ export default function App() {
                       </Button>
                     </form>
                     <span className="mutedText">
-                      Invited members get full access to this workspace: skills, credentials, and API keys. Removing a member also revokes their active sessions.
+                      The vault does not send an email. After inviting, use Copy invite below and send those instructions yourself. Accepted members get full access to skills, credentials, and API keys.
                     </span>
                   </CardContent>
                 </Card>
@@ -1555,27 +1582,38 @@ export default function App() {
               <Card className="settingsCard">
                 <CardHeader>
                   <div className="settingsIcon"><Users size={19} /></div>
-                  <div><CardTitle>Workspace members</CardTitle><CardDescription>{teamMembers.length} invited collaborators.</CardDescription></div>
+                  <div><CardTitle>Workspace access</CardTitle><CardDescription>{activeTeamMembers.length} active · {pendingTeamMembers.length} pending.</CardDescription></div>
                 </CardHeader>
                 <CardContent className="apiContent">
                   <div className="keyList">
                     {teamMembers.length === 0 ? (
-                      <span className="mutedText">No invited members yet. This workspace is only accessible to its owner.</span>
+                      <span className="mutedText">No teammates yet. This workspace is only accessible to its owner.</span>
                     ) : teamMembers.map((member) => (
                       <div className="keyRow" key={member.id}>
                         <div>
-                          <strong>{member.email}</strong>
-                          <span>Invited {formatDate(member.created_at)}</span>
+                          <div className="memberHeading">
+                            <strong>{member.email}</strong>
+                            <Badge variant={member.status === "pending" ? "muted" : "accent"}>{member.status === "pending" ? "Pending" : "Active"}</Badge>
+                          </div>
+                          <span>{member.status === "pending" ? `Invited ${formatDate(member.created_at)} · awaiting acceptance` : `Joined ${formatDate(member.created_at)}`}</span>
                         </div>
                         {isWorkspaceOwner ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            className="dangerButton"
-                            onClick={() => void dropMember(member)}
-                          >
-                            Remove
-                          </Button>
+                          <div className="rowActions">
+                            {member.status === "pending" ? (
+                              <Button type="button" variant="outline" size="sm" onClick={() => void copyInvitation(member)}>
+                                <Clipboard size={14} /> Copy invite
+                              </Button>
+                            ) : null}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="dangerButton"
+                              onClick={() => void dropMember(member)}
+                            >
+                              {member.status === "pending" ? "Cancel invite" : "Remove"}
+                            </Button>
+                          </div>
                         ) : null}
                       </div>
                     ))}

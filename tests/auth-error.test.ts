@@ -12,3 +12,10 @@ test("shows the Gonvex rejection instead of erasing it", () => {
 test("falls back when the rejection is empty", () => {
   assert.equal(getAuthErrorMessage(null), "Google login was rejected. Try again.");
 });
+
+test("explains how an invited user should recover from an access rejection", () => {
+  assert.equal(
+    getAuthErrorMessage(new Error("google account is not allowed for this vault")),
+    "This Google account does not have vault access. If you were invited, sign out of Google and use the exact email address on the invitation.",
+  );
+});

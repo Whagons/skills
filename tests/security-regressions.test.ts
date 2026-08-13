@@ -13,6 +13,15 @@ test("CLI authorization never puts an API key in a callback URL", async () => {
   assert.doesNotMatch(cli, /r\.URL\.Query\(\)\.Get\("api_key"\)/);
 });
 
+test("browser-authorized CLI keys are scoped and expire after one year", async () => {
+  const app = await source("src/App.tsx");
+  const backend = await source("gonvex/skills.go");
+
+  assert.match(app, /const cliAPIKeyLifetimeDays = 365/);
+  assert.match(app, /scopes: cliScopes,[\s\S]{0,100}expires_in_days: cliAPIKeyLifetimeDays/);
+  assert.match(backend, /maxAPIKeyTTL\s+= 365 \* 24 \* time\.Hour/);
+});
+
 test("copied setup text never embeds the live API key", async () => {
   const app = await source("src/App.tsx");
   assert.doesNotMatch(app, /printf '%s' '\$\{apiKey\}'/);
@@ -31,9 +40,23 @@ test("member removal revokes keys created by that member", async () => {
 });
 
 test("workspace invitations require explicit acceptance", async () => {
+  const app = await source("src/App.tsx");
   const backend = await source("gonvex/skills.go");
   assert.match(backend, /team\.invitations\.accept/);
   assert.match(backend, /pending_only/);
+  assert.match(app, /Review invitation/);
+});
+
+test("workspace owners can distinguish and cancel pending invitations", async () => {
+  const app = await source("src/App.tsx");
+  const backend = await source("gonvex/skills.go");
+
+  assert.match(backend, /Status\s+string\s+`json:"status"`/);
+  assert.match(backend, /'pending'::text as status[\s\S]{0,150}from skill_workspace_invitations/);
+  assert.match(backend, /delete from skill_workspace_invitations/);
+  assert.match(app, /member\.status === "pending"/);
+  assert.match(app, /Cancel invite/);
+  assert.match(app, /Copy invite/);
 });
 
 test("production nginx sends baseline browser security headers", async () => {
