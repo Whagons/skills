@@ -47,6 +47,14 @@ type Config struct {
 	GoBinary            string   `json:"goBinary,omitempty"`
 }
 
+func configWithAuthorization(config Config, apiKey, appURL, wsURL, project string) Config {
+	config.APIKey = apiKey
+	config.AppURL = appURL
+	config.WSURL = wsURL
+	config.Project = project
+	return config
+}
+
 type Skill struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -807,12 +815,7 @@ func browserLogin(appURL string) error {
 <div style="text-align:center"><h1 style="margin:0 0 8px">whagons-dev is authorized</h1>
 <p style="color:#9db3aa;margin:0">You can close this tab and return to your terminal.</p></div></body>`)
 		select {
-		case resultCh <- Config{
-			APIKey:  payload.APIKey,
-			AppURL:  trustedAppURL,
-			WSURL:   wsURL,
-			Project: project,
-		}:
+		case resultCh <- configWithAuthorization(config, payload.APIKey, trustedAppURL, wsURL, project):
 		default:
 		}
 	})

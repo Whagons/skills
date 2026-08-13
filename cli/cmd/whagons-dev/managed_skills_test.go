@@ -115,6 +115,24 @@ func TestEnvironmentOverrideReplacesExistingValue(t *testing.T) {
 	}
 }
 
+func TestBrowserAuthorizationPreservesManagedSkillConfiguration(t *testing.T) {
+	existing := Config{
+		ManagementKey:       "local-signing-key",
+		SkillTargets:        []string{"agents", "claude"},
+		SyncIntervalSeconds: 60,
+		AutoSelfUpdate:      true,
+		LastSelfUpdate:      "2026-08-13T00:00:00Z",
+		GoBinary:            "/usr/local/go/bin/go",
+	}
+	updated := configWithAuthorization(existing, "skv_new", "https://skills.whagons.com/", "wss://example.test/ws", "skills")
+	if updated.APIKey != "skv_new" || updated.AppURL != "https://skills.whagons.com/" || updated.WSURL != "wss://example.test/ws" || updated.Project != "skills" {
+		t.Fatalf("authorization fields were not updated: %#v", updated)
+	}
+	if updated.ManagementKey != existing.ManagementKey || strings.Join(updated.SkillTargets, ",") != "agents,claude" || updated.SyncIntervalSeconds != 60 || !updated.AutoSelfUpdate || updated.LastSelfUpdate != existing.LastSelfUpdate || updated.GoBinary != existing.GoBinary {
+		t.Fatalf("local managed-skill configuration was lost: %#v", updated)
+	}
+}
+
 func TestPruneManagedSkillsOnlyRemovesSignedUnmodifiedDirectories(t *testing.T) {
 	root := t.TempDir()
 	key := []byte("01234567890123456789012345678901")
