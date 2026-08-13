@@ -306,21 +306,26 @@ client.close();`;
 function agentSetupInstructions() {
   return `Whagons Skills Vault — agent setup (plug and play)
 
-Goal: give this agent the Whagons team's skills and project credentials with two commands.
+Goal: give local coding agents the Whagons team's skills and project credentials with two commands.
 
 1. Install the whagons-dev CLI:
    go install github.com/whagons/skills/cli/cmd/whagons-dev@latest
 
-2. Install the team's skills locally (the CLI opens https://skills.whagons.com in the
-   browser on first run, you click "Authorize CLI", and it saves its own API key):
-   whagons-dev skills install-codex
+2. Configure managed skills, detected agent integrations, background sync, and CLI updates
+   (the CLI opens https://skills.whagons.com on first run; click "Authorize CLI"):
+   whagons-dev setup
+
+   To link skills into every supported agent target:
+   whagons-dev setup --targets all
 
 The copied setup never includes a live key. The CLI opens the browser for an explicit,
 scoped authorization. If a key was created manually, copy it separately and provide it
 to \`whagons-dev auth set-key --stdin\` through a secure channel.
 
 That's it. From then on:
-- Refresh skills any time: whagons-dev skills update-codex
+- Refresh skills any time: whagons-dev skills update
+- Update the CLI now: whagons-dev --update
+- Inspect integrations/background sync: whagons-dev skills status
 - See what credentials exist: whagons-dev credentials list
 - Run anything that needs a secret WITHOUT printing it:
   whagons-dev credentials exec coolify-whagons -- <command> [args...]
@@ -339,6 +344,8 @@ whagons-dev skills get whagons-monitor --output ./SKILL.md
 whagons-dev skills copy whagons-monitor
 whagons-dev skills upload ./my-skill/SKILL.md
 whagons-dev skills sync ./skills
+whagons-dev skills install --targets all
+whagons-dev startup status
 whagons-dev auth status
 
 Direct Gonvex API path for custom scripts:
@@ -352,6 +359,8 @@ Security rules:
 - If using agent.credentials.get directly, pass the value only into the command that
   needs it and never echo it.
 - The CLI stores its config at ~/.whagons-dev/config.json with mode 0600.
+- Canonical vault skills live in ~/.whagons-dev/skills and are linked into supported
+  agent directories. Signed ownership metadata lets the CLI prune only its own files.
 - Keep uploaded skills universal; avoid private machine paths or one-person local
   assumptions unless the skill is explicitly local-infra scoped.`;
 }

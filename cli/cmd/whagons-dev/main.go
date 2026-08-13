@@ -35,10 +35,16 @@ const (
 )
 
 type Config struct {
-	APIKey  string `json:"apiKey,omitempty"`
-	WSURL   string `json:"wsURL,omitempty"`
-	Project string `json:"project,omitempty"`
-	AppURL  string `json:"appURL,omitempty"`
+	APIKey              string   `json:"apiKey,omitempty"`
+	WSURL               string   `json:"wsURL,omitempty"`
+	Project             string   `json:"project,omitempty"`
+	AppURL              string   `json:"appURL,omitempty"`
+	ManagementKey       string   `json:"managementKey,omitempty"`
+	SkillTargets        []string `json:"skillTargets,omitempty"`
+	SyncIntervalSeconds int      `json:"syncIntervalSeconds,omitempty"`
+	AutoSelfUpdate      bool     `json:"autoSelfUpdate,omitempty"`
+	LastSelfUpdate      string   `json:"lastSelfUpdate,omitempty"`
+	GoBinary            string   `json:"goBinary,omitempty"`
 }
 
 type Skill struct {
@@ -116,9 +122,25 @@ func run(args []string) error {
 	}
 
 	switch group {
+	case "apply-update":
+		return runApplyUpdate(args[1:])
+	case "--update", "update", "self-update":
+		return runSelfUpdate(args[1:])
+	case "version", "--version", "-v":
+		fmt.Printf("whagons-dev %s\n", cliVersion)
+		return nil
+	case "setup":
+		return runSetup(args[1:])
+	case "daemon":
+		return runDaemon(args[1:])
+	case "startup":
+		return runStartup(command, rest)
 	case "auth":
 		return runAuth(command, rest)
 	case "skills":
+		if command == "status" {
+			return printSkillStatus()
+		}
 		return withClient(func(client *Client, apiKey string, _ Config) error {
 			return runSkills(client, apiKey, command, rest)
 		})
@@ -140,15 +162,24 @@ func usage() {
 	fmt.Print(`whagons-dev — Whagons developer CLI for the Skills Vault
 
 Usage:
+  whagons-dev setup [--targets all|LIST] [--no-startup] [--interval DURATION]
+  whagons-dev --update
+  whagons-dev update
+  whagons-dev self-update
+  whagons-dev startup install|status|remove
+  whagons-dev daemon [--interval DURATION] [--once]
   whagons-dev auth login [--app-url URL]
   whagons-dev auth set-key --stdin        (pipe a key minted in the vault UI)
   whagons-dev auth status
-	  whagons-dev auth logout [--local-only]
+  whagons-dev auth logout [--local-only]
   whagons-dev skills list
   whagons-dev skills get <name-or-id> [--output FILE]
   whagons-dev skills copy <name-or-id>
   whagons-dev skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
   whagons-dev skills sync <DIR>
+  whagons-dev skills install [--targets all|LIST]
+  whagons-dev skills update
+  whagons-dev skills status
   whagons-dev skills install-codex [--dir DIR]
   whagons-dev skills update-codex [--dir DIR]
   whagons-dev skills delete <name-or-id>
@@ -157,17 +188,20 @@ Usage:
   whagons-dev credentials list
   whagons-dev credentials set <name> [--summary TEXT] [--value-stdin]
   whagons-dev credentials delete <id>
-	  whagons-dev credentials exec <name> [--via file|stdin|env] [--prefix PREFIX]
-	      [--inherit-env NAME[,NAME...]] -- <command> [args...]
+  whagons-dev credentials exec <name> [--via file|stdin|env] [--prefix PREFIX]
+      [--inherit-env NAME[,NAME...]] -- <command> [args...]
 
 What it does:
+  - Keeps signed canonical skills in ~/.whagons-dev/skills and links them into supported agents.
+  - Can run a lightweight background sync at login and safely prune deleted managed skills.
+  - Updates itself with --update (and automatically from the background service).
   - Authenticates itself by opening the Skills Vault in your browser (automatic on first use).
   - Lists, copies, uploads, and deletes your workspace's cloud skills.
-  - Installs or updates cloud skills into Codex-compatible SKILL.md folders.
+  - Installs or updates cloud skills for Codex, T3, Claude, Cursor, and OpenCode.
   - Stores project credentials and injects them into child processes without printing them.
 
-	Secrets are not printed by default. Credential files are mode 0600 and deleted after the child exits.
-	Child processes receive a minimal environment; opt in to additional non-secret variables with --inherit-env.
+Secrets are not printed by default. Credential files are mode 0600 and deleted after the child exits.
+Child processes receive a minimal environment; opt in to additional non-secret variables with --inherit-env.
 `)
 }
 
@@ -256,7 +290,10 @@ func runAuth(command string, args []string) error {
 				return fmt.Errorf("could not revoke the server key; local authentication was preserved: %w (use --local-only to clear it anyway)", err)
 			}
 		}
-		if err := writeConfig(Config{}); err != nil {
+		// Keep local skill ownership and startup preferences so logging out does
+		// not orphan managed files or make safe pruning impossible after login.
+		config.APIKey = ""
+		if err := writeConfig(config); err != nil {
 			return err
 		}
 		if *localOnly {
@@ -352,13 +389,34 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 		}
 		fmt.Printf("Synced %d skills\n", len(files))
 		return nil
-	case "install-codex", "update-codex":
-		fs := flag.NewFlagSet("skills "+command, flag.ContinueOnError)
-		dir := fs.String("dir", defaultCodexSkillsDir(), "Codex skills directory")
+	case "install":
+		fs := flag.NewFlagSet("skills install", flag.ContinueOnError)
+		targetValue := fs.String("targets", "all", "comma-separated targets: all, codex, t3, claude, cursor, opencode, agents")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
-		return installCodexSkills(client, apiKey, *dir)
+		targets, err := normalizeTargets([]string{*targetValue})
+		if err != nil {
+			return err
+		}
+		return installAndRememberSkills(client, apiKey, targets)
+	case "update":
+		config, _ := readConfig()
+		targets := config.SkillTargets
+		if len(targets) == 0 {
+			targets = []string{"agents"}
+		}
+		return installAndRememberSkills(client, apiKey, targets)
+	case "install-codex", "update-codex":
+		fs := flag.NewFlagSet("skills "+command, flag.ContinueOnError)
+		dir := fs.String("dir", "", "custom Codex skills directory (legacy override)")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if *dir != "" {
+			return installManagedSkillsToCustomDir(client, apiKey, *dir)
+		}
+		return installAndRememberSkills(client, apiKey, []string{"agents"})
 	case "delete":
 		if len(args) < 1 {
 			return errors.New("missing skill name or id")
@@ -1096,7 +1154,7 @@ func reportUpload(skill Skill) {
 	appURL := firstNonEmpty(envValue("APP_URL"), config.AppURL, defaultAppURL)
 	fmt.Printf("Uploaded %s (PENDING APPROVAL)\n", skill.Name)
 	fmt.Printf("  Agent-uploaded skills require workspace owner approval before they\n")
-	fmt.Printf("  become visible to 'skills list', 'skills get', and 'install-codex'.\n")
+	fmt.Printf("  become visible to 'skills list', 'skills get', and 'skills install'.\n")
 	fmt.Printf("  Approve it at %s\n", appURL)
 	fmt.Printf("  Note: re-uploading an already approved skill resets its approval,\n")
 	fmt.Printf("  which removes it from the workspace listing until re-approved.\n")
@@ -1131,55 +1189,6 @@ func discoverSkillFiles(root string) ([]string, error) {
 	})
 	sort.Strings(files)
 	return files, err
-}
-
-func installCodexSkills(client *Client, apiKey string, dir string) error {
-	if strings.TrimSpace(dir) == "" {
-		return errors.New("Codex skills directory is required")
-	}
-	var skills []Skill
-	if err := client.Query("agent.skills.list", map[string]any{"apiKey": apiKey}, &skills); err != nil {
-		return err
-	}
-	if err := ensureSafeDirectory(dir, 0o755); err != nil {
-		return err
-	}
-	for _, meta := range skills {
-		// Lists are metadata-only; fetch each skill's content individually.
-		var skill Skill
-		if err := client.Query("agent.skills.get", map[string]any{"apiKey": apiKey, "id": meta.ID}, &skill); err != nil {
-			return fmt.Errorf("fetch %s: %w", meta.Name, err)
-		}
-		name := safePathName(skill.Name)
-		if name == "" {
-			name = safePathName(skill.ID)
-		}
-		if len(skill.Content) > maxSkillBytes {
-			return fmt.Errorf("refusing oversized skill %s (%d bytes)", skill.Name, len(skill.Content))
-		}
-		skillDir := filepath.Join(dir, name)
-		if err := ensureSafeDirectory(skillDir, 0o755); err != nil {
-			return err
-		}
-		path := filepath.Join(skillDir, "SKILL.md")
-		if err := writeRegularFile(path, []byte(skill.Content), 0o644); err != nil {
-			return err
-		}
-		fmt.Printf("Installed %s -> %s\n", skill.Name, path)
-	}
-	fmt.Printf("Installed %d skills into %s\n", len(skills), dir)
-	return nil
-}
-
-func defaultCodexSkillsDir() string {
-	if dir := os.Getenv("CODEX_SKILLS_DIR"); dir != "" {
-		return dir
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".codex/skills/whagons"
-	}
-	return filepath.Join(home, ".codex", "skills", "whagons")
 }
 
 var pathReplace = regexp.MustCompile(`[^A-Za-z0-9._-]+`)

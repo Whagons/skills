@@ -6,13 +6,27 @@ Gonvex + React app at https://skills.whagons.com for storing Whagons-specific ag
 
 ```bash
 go install github.com/whagons/skills/cli/cmd/whagons-dev@latest
-whagons-dev skills install-codex
+whagons-dev setup
 ```
 
-That's it. On first use the CLI opens https://skills.whagons.com in the browser; sign in with Google, click **Authorize CLI**, and the CLI saves its own API key to `~/.whagons-dev/config.json` (mode `0600`). Every later command just works:
+That's it. On first use the CLI opens https://skills.whagons.com in the browser; sign in with Google and click **Authorize CLI**. `setup` then:
+
+- stores signed canonical skills in `~/.whagons-dev/skills`,
+- links them into the compatible agents detected on the machine,
+- installs a lightweight login service that receives live vault changes with a periodic fallback, and
+- enables a daily CLI self-update check.
+
+Install every supported integration instead of only detected agents with:
 
 ```bash
-whagons-dev skills update-codex                                  # refresh local skills
+whagons-dev setup --targets all
+```
+
+Every later command just works:
+
+```bash
+whagons-dev skills update                                        # refresh managed skills now
+whagons-dev --update                                             # update the CLI now
 whagons-dev credentials list                                     # see what secrets exist
 whagons-dev credentials exec coolify-whagons -- node deploy.mjs  # inject a secret, never print it
 ```
@@ -135,6 +149,17 @@ go install github.com/whagons/skills/cli/cmd/whagons-dev@latest
 Commands:
 
 ```bash
+whagons-dev setup [--targets all|codex,t3,claude,cursor,opencode] [--no-startup]
+whagons-dev --update
+whagons-dev update
+whagons-dev self-update
+whagons-dev version
+
+whagons-dev startup install
+whagons-dev startup status
+whagons-dev startup remove
+whagons-dev daemon [--interval 1m] [--once]
+
 whagons-dev auth login [--app-url https://skills.whagons.com/]
 printf '%s' "$KEY" | whagons-dev auth set-key --stdin
 whagons-dev auth status
@@ -145,6 +170,9 @@ whagons-dev skills get whagons-monitor --output ./SKILL.md
 whagons-dev skills copy whagons-monitor
 whagons-dev skills upload ./my-skill/SKILL.md
 whagons-dev skills sync ./skills
+whagons-dev skills install [--targets all|codex,t3,claude,cursor,opencode]
+whagons-dev skills update
+whagons-dev skills status
 whagons-dev skills install-codex [--dir DIR]
 whagons-dev skills update-codex [--dir DIR]
 whagons-dev skills delete <name-or-id>
@@ -160,9 +188,30 @@ whagons-dev credentials delete <id>
 
 `credentials exec` writes the credential to a temporary mode-`0600` file, exposes its path as `WHAGONS_CREDENTIAL_FILE` and `<NAME>_FILE`, and deletes it after the child exits. The child receives a minimal non-secret environment. Use `--inherit-env NAME[,NAME...]` for additional non-secret variables, `--via stdin` for stdin delivery, or the explicit compatibility mode `--via env` for flattened credential variables.
 
-`skills install-codex` / `update-codex` write cloud skills to `~/.codex/skills/whagons/<skill-name>/SKILL.md` by default; override with `--dir`.
+### Managed skills and integrations
 
-Environment overrides: `WHAGONS_DEV_API_KEY`, `WHAGONS_DEV_WS_URL`, `WHAGONS_DEV_PROJECT`, `WHAGONS_DEV_APP_URL`, `WHAGONS_DEV_CONFIG` (the legacy `WHAGONS_SKILLS_*` names still work). Config from the old `whagons-skills` CLI at `~/.whagons-skills/config.json` is read automatically if the new path does not exist.
+The canonical store is `~/.whagons-dev/skills/<skill-name>/`. Each skill has a secret-key-authenticated `.whagons-managed.json` ownership marker. A sync will only overwrite or delete a directory when that signature is valid and the local `SKILL.md` still matches its recorded hash. Locally modified and unsigned directories are preserved and reported.
+
+The CLI creates one link per managed skill, never replaces an existing user-owned skill, and removes links and canonical directories when the corresponding vault skill is deleted. On Windows it falls back to directory junctions when ordinary symlinks are unavailable.
+
+Supported targets:
+
+- `codex`, `t3`, and `agents` use the portable `~/.agents/skills` directory. Current Codex, T3 Code, Cursor, and OpenCode understand this Agent Skills location.
+- `claude` uses `~/.claude/skills`.
+- `cursor` explicitly uses `~/.cursor/skills` when that native path is preferred.
+- `opencode` explicitly uses `~/.config/opencode/skills` when that native path is preferred.
+
+`--targets all` selects the portable Agent Skills directory plus Claude. This covers every supported tool without making Cursor or OpenCode discover duplicate copies.
+
+`skills install-codex` and `skills update-codex` remain compatibility aliases for the portable Codex/T3 target. A supplied legacy `--dir` is treated as a custom linked target.
+
+### Background synchronization and CLI updates
+
+`setup` registers a per-user service through systemd on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows. The daemon subscribes to vault skill metadata so approved edits and deletions are applied promptly; the configured interval (one minute by default) is also a reconnect/fallback window. It does not expose credentials or run as root.
+
+The daemon checks once per day for a new CLI and runs the same safe updater exposed as `whagons-dev --update`. The current updater uses the official Go module, so Go must remain installed and available on `PATH`. Disable background registration with `setup --no-startup`, disable automatic CLI updates with `setup --no-auto-update`, or remove the service with `startup remove`.
+
+Environment overrides: `WHAGONS_DEV_API_KEY`, `WHAGONS_DEV_WS_URL`, `WHAGONS_DEV_PROJECT`, `WHAGONS_DEV_APP_URL`, `WHAGONS_DEV_CONFIG`, `WHAGONS_DEV_SKILLS_DIR` (the legacy `WHAGONS_SKILLS_*` names still work). Config from the old `whagons-skills` CLI at `~/.whagons-skills/config.json` is read automatically if the new path does not exist.
 
 ## Agent bootstrap
 
