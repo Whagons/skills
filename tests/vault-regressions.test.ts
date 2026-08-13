@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { dedupeCredentials } from "../src/lib/credentials.ts";
 import { invitationInstructions } from "../src/lib/invitations.ts";
+import { isCurrentSkillRevision } from "../src/lib/skill-review.ts";
 import { readVaultTab, vaultURLForTab, vaultURLWithoutCLIAuth } from "../src/lib/vault-state.ts";
 
 async function source(path: string) {
@@ -108,4 +109,18 @@ test("the credential vault collapses legacy duplicate metadata before rendering"
     { id: "cloudflare", name: "cloudflare", updated_at: "2026-07-09T00:00:00Z" },
   ]);
   assert.deepEqual(credentials.map(({ id }) => id), ["cloudflare", "scoped"]);
+});
+
+test("skill review never presents cached content from an older revision", async () => {
+  const metadata = { id: "skill-1", updated_at: "2026-08-13T18:00:00Z" };
+  const staleDetail = { id: "skill-1", updated_at: "2026-08-12T18:00:00Z" };
+  const currentDetail = { id: "skill-1", updated_at: "2026-08-13T18:00:00Z" };
+
+  assert.equal(isCurrentSkillRevision(metadata, staleDetail), false);
+  assert.equal(isCurrentSkillRevision(metadata, currentDetail), true);
+
+  const app = await source("src/App.tsx");
+  assert.match(app, /gonvex\.query<Skill>\(api\.skills\.get/);
+  assert.match(app, /const approved = await approveSkill/);
+  assert.match(app, /setSelectedSkillLoad\([^;]*approved/s);
 });

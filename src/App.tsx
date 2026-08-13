@@ -40,6 +40,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip
 import { getAuthErrorMessage } from "./lib/auth-error";
 import { dedupeCredentials } from "./lib/credentials";
 import { invitationInstructions } from "./lib/invitations";
+import { isCurrentSkillRevision } from "./lib/skill-review";
 import {
   readVaultTab,
   vaultURLForSkill,
@@ -141,6 +142,11 @@ type InvitationLoad = {
   status: "idle" | "loading" | "ready" | "error";
   invitations: WorkspaceInvitation[];
   error: string;
+};
+
+type SelectedSkillLoad = {
+  status: "idle" | "loading" | "ready" | "error";
+  skill: Skill | null;
 };
 
 type ColorTheme = "light" | "dark";
@@ -399,6 +405,7 @@ export default function App() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [invitationReload, setInvitationReload] = useState(0);
   const [invitationLoad, setInvitationLoad] = useState<InvitationLoad>({ status: "idle", invitations: [], error: "" });
+  const [selectedSkillLoad, setSelectedSkillLoad] = useState<SelectedSkillLoad>({ status: "idle", skill: null });
 
   const gonvex = useConvex();
   const protectedArgs = sessionToken ? { sessionToken } : "skip";
@@ -435,16 +442,37 @@ export default function App() {
   }, [query, skills]);
 
   const selectedSkill = skills.find((skill) => skill.id === selectedID) ?? filteredSkills[0] ?? skills[0] ?? null;
-  const selectedSkillFull = useQuery<Skill>(
-    api.skills.get,
-    sessionToken && me && !me.pending_only && selectedSkill ? { sessionToken, id: selectedSkill.id } : "skip",
-  ) ?? null;
+  const selectedSkillFull = isCurrentSkillRevision(selectedSkill, selectedSkillLoad.skill) ? selectedSkillLoad.skill : null;
   const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
+  const selectedSkillApproved = selectedSkillFull?.approved ?? selectedSkill?.approved ?? false;
   const invitations = invitationLoad.invitations;
   const activeTeamMembers = teamMembers.filter((member) => member.status !== "pending");
   const pendingTeamMembers = teamMembers.filter((member) => member.status === "pending");
   const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && (!key.expires_at || new Date(key.expires_at).getTime() > Date.now()));
   const credentials = useMemo(() => dedupeCredentials(credentialRecords), [credentialRecords]);
+
+  useEffect(() => {
+    if (!sessionToken || !me || me.pending_only || !selectedSkill) {
+      setSelectedSkillLoad({ status: "idle", skill: null });
+      return;
+    }
+
+    let cancelled = false;
+    setSelectedSkillLoad((current) => isCurrentSkillRevision(selectedSkill, current.skill)
+      ? current
+      : { status: "loading", skill: null });
+    void gonvex.query<Skill>(api.skills.get, { sessionToken, id: selectedSkill.id })
+      .then((skill) => {
+        if (!cancelled) setSelectedSkillLoad({ status: "ready", skill });
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedSkillLoad({ status: "error", skill: null });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [gonvex, me?.pending_only, selectedSkill?.id, selectedSkill?.updated_at, sessionToken]);
 
   useEffect(() => {
     if (!sessionToken) {
@@ -1164,11 +1192,12 @@ export default function App() {
                 <p className="summaryLine">{selectedSkill.summary || "A team instruction set ready for agents to use."}</p>
               </div>
               <div className="primaryActions">
-                {!selectedSkill.approved && isWorkspaceOwner ? (
+                {!selectedSkillApproved && isWorkspaceOwner ? (
                   <Button type="button" variant="accent" onClick={() => void runGuarded(async () => {
-                    await approveSkill({ sessionToken, id: selectedSkill.id });
+                    const approved = await approveSkill({ sessionToken, id: selectedSkill.id }) as Skill;
+                    setSelectedSkillLoad({ status: "ready", skill: approved });
                     setNotice("Approved skill for agent installation");
-                  })}>
+                  })} disabled={selectedSkillFull === null}>
                     <ShieldCheck size={16} /> Approve
                   </Button>
                 ) : null}
@@ -1227,7 +1256,7 @@ export default function App() {
                     <div><strong>SKILL.md</strong><small>Rendered document</small></div>
                   </div>
                   <div className="metaStrip">
-                    <Badge variant={selectedSkill.approved ? "accent" : "outline"}>{selectedSkill.approved ? "Approved" : "Review required"}</Badge>
+                    <Badge variant={selectedSkillApproved ? "accent" : "outline"}>{selectedSkillApproved ? "Approved" : "Review required"}</Badge>
                     {selectedContent !== null ? (
                       <>
                         <Badge variant="muted">{countWords(selectedContent).toLocaleString()} words</Badge>
