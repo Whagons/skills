@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  web:
+    name: Web (lockfile, tests, types, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pnpm (same pin as the Dockerfile)
+        run: npm install --global pnpm@11.10.0
+      # --frozen-lockfile mirrors the Docker build; a package.json bump
+      # without a pnpm-lock.yaml update fails here instead of at deploy.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Tests
+        run: npm test
+      - name: Typecheck
+        run: npx tsc -p tsconfig.app.json --noEmit
+      - name: Build
+        run: npx vite build
+
+  cli:
+    name: CLI (build, vet, tests)
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - name: Build
+        working-directory: cli
+        run: go build ./...
+      - name: Vet
+        working-directory: cli
+        run: go vet ./...
+      - name: Tests
+        working-directory: cli
+        run: go test ./...
