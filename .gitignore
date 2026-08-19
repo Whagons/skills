@@ -7,3 +7,4 @@ node_modules
 cli/whagons-skills
 cli/whagons-dev
 *.log
+cli/cmd/whagons-dev/whagons-dev
