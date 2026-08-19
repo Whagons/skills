@@ -68,6 +68,22 @@ test("production nginx sends baseline browser security headers", async () => {
   assert.match(nginx, /X-Content-Type-Options[^\n]*nosniff/i);
 });
 
+test("CSP stays tight while allowing what the page actually loads", async () => {
+  const nginx = await source("nginx.conf");
+  const csp = nginx.match(/Content-Security-Policy "([^"]+)"/i)?.[1] ?? "";
+  const directive = (name: string) => csp.split(";").map((d) => d.trim()).find((d) => d.startsWith(name + " ")) ?? "";
+  // Cloudflare Web Analytics is injected at the edge; it needs its script
+  // host and its RUM endpoint, nothing broader.
+  assert.match(directive("script-src"), /https:\/\/static\.cloudflareinsights\.com/);
+  assert.match(directive("connect-src"), /https:\/\/cloudflareinsights\.com/);
+  assert.doesNotMatch(directive("script-src"), /'unsafe-inline'|'unsafe-eval'|\bdata:/);
+  // Fonts are served as files, so font-src never needs data:. Vite would
+  // inline any font under 4 KB unless told otherwise.
+  assert.equal(directive("font-src"), "font-src 'self'");
+  const vite = await source("vite.config.ts");
+  assert.match(vite, /assetsInlineLimit:[^\n]*woff2/);
+});
+
 test("patched Gonvex dev wrapper cannot leak project keys to URLs or child env", async () => {
   const patch = await source("patches/@gonvex__cli@0.1.31.patch");
   assert.match(patch, /env: publicChildEnvironment\(\)/);
