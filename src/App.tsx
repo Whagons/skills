@@ -30,7 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../gonvex/_generated/api";
-import { useConvex, useMutation, useQuery } from "../gonvex/_generated/react";
+import { useConvex, useMutation, useSync } from "../gonvex/_generated/react";
 import { Avatar, AvatarFallback } from "./components/ui/avatar";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -40,7 +40,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip
 import { getAuthErrorMessage } from "./lib/auth-error";
 import { dedupeCredentials } from "./lib/credentials";
 import { invitationInstructions } from "./lib/invitations";
-import { isCurrentSkillRevision } from "./lib/skill-review";
 import {
   readVaultTab,
   vaultURLForSkill,
@@ -112,8 +111,50 @@ type MeResult = {
   email: string;
   name: string;
   is_owner: boolean;
+  workspace_id: string;
   workspace_email: string;
   pending_only: boolean;
+};
+
+// Raw rows delivered by the durable sync collections. Column names match the
+// Postgres tables; timestamps arrive as RFC 3339 strings, absent ones as null.
+type SkillRow = {
+  id: string;
+  owner_id: string;
+  name: string;
+  summary: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  approved_by: string;
+};
+
+type APIKeyRow = {
+  id: string;
+  owner_id: string;
+  created_by: string;
+  name: string;
+  prefix: string;
+  scopes: string;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+};
+
+type CredentialRow = CredentialMeta & { owner_id: string };
+
+type MemberRow = {
+  id: string;
+  workspace_owner_id: string;
+  email: string;
+  invited_by: string;
+  created_at: string;
+};
+
+type InvitationRow = MemberRow & {
+  accepted_at: string | null;
+  rejected_at: string | null;
 };
 
 type TeamMember = {
@@ -144,9 +185,10 @@ type InvitationLoad = {
   error: string;
 };
 
-type SelectedSkillLoad = {
-  status: "idle" | "loading" | "ready" | "error";
-  skill: Skill | null;
+type IdentityLoad = {
+  status: "idle" | "loading" | "ready";
+  me: MeResult | null;
+  workspaces: WorkspaceRecord[];
 };
 
 type ColorTheme = "light" | "dark";
@@ -405,17 +447,55 @@ export default function App() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [invitationReload, setInvitationReload] = useState(0);
   const [invitationLoad, setInvitationLoad] = useState<InvitationLoad>({ status: "idle", invitations: [], error: "" });
-  const [selectedSkillLoad, setSelectedSkillLoad] = useState<SelectedSkillLoad>({ status: "idle", skill: null });
+  const [identityLoad, setIdentityLoad] = useState<IdentityLoad>({ status: "idle", me: null, workspaces: [] });
 
   const gonvex = useConvex();
-  const protectedArgs = sessionToken ? { sessionToken } : "skip";
-  const me = useQuery<MeResult>(api.auth.me, protectedArgs) ?? null;
-  const activeWorkspaceArgs = sessionToken && me && !me.pending_only ? { sessionToken } : "skip";
-  const skills = useQuery<SkillMeta[]>(api.skills.list, activeWorkspaceArgs) ?? [];
-  const apiKeys = useQuery<APIKeyRecord[]>(api.apiKeys.list, activeWorkspaceArgs) ?? [];
-  const credentialRecords = useQuery<CredentialMeta[]>(api.credentials.list, activeWorkspaceArgs) ?? [];
-  const teamMembers = useQuery<TeamMember[]>(api.team.list, activeWorkspaceArgs) ?? [];
-  const workspaces = useQuery<WorkspaceRecord[]>(api.auth.workspaces, protectedArgs) ?? [];
+  const me = identityLoad.me;
+  const workspaces = identityLoad.workspaces;
+  // Everything workspace-scoped renders from durable sync collections instead
+  // of query subscriptions: rows come from IndexedDB first, then row-level
+  // deltas. ownerId pins each collection to the active workspace; the handler
+  // rejects a mismatch.
+  const syncArgs = sessionToken && me && !me.pending_only && me.workspace_id
+    ? { sessionToken, ownerId: me.workspace_id }
+    : "skip" as const;
+  const skillRows = useSync<SkillRow>(api.skills.sync, syncArgs) ?? [];
+  const apiKeyRows = useSync<APIKeyRow>(api.apiKeys.sync, syncArgs) ?? [];
+  const credentialRows = useSync<CredentialRow>(api.credentials.sync, syncArgs) ?? [];
+  const memberRows = useSync<MemberRow>(api.team.membersSync, syncArgs) ?? [];
+  const invitationRows = useSync<InvitationRow>(
+    api.team.invitationsSync,
+    syncArgs !== "skip" && me?.is_owner ? syncArgs : "skip",
+  ) ?? [];
+  const skills = useMemo<SkillMeta[]>(() => [...skillRows]
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      summary: row.summary,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      approved: row.approved_at !== null,
+    })), [skillRows]);
+  const apiKeys = useMemo<APIKeyRecord[]>(() => [...apiKeyRows]
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      prefix: row.prefix,
+      created_at: row.created_at,
+      revoked_at: row.revoked_at,
+      expires_at: row.expires_at,
+      scopes: row.scopes.split(",").map((scope) => scope.trim()).filter(Boolean),
+    })), [apiKeyRows]);
+  const credentialRecords = useMemo<CredentialMeta[]>(() => [...credentialRows]
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at)), [credentialRows]);
+  const teamMembers = useMemo<TeamMember[]>(() => [
+    ...memberRows.map((row) => ({ id: row.id, email: row.email, created_at: row.created_at, status: "active" as const })),
+    ...invitationRows
+      .filter((row) => row.accepted_at === null && row.rejected_at === null)
+      .map((row) => ({ id: row.id, email: row.email, created_at: row.created_at, status: "pending" as const })),
+  ].sort((a, b) => b.created_at.localeCompare(a.created_at)), [memberRows, invitationRows]);
   const login = useMutation(api.auth.login);
   const logout = useMutation(api.auth.logout);
   const switchWorkspace = useMutation(api.auth.switchWorkspace);
@@ -442,37 +522,49 @@ export default function App() {
   }, [query, skills]);
 
   const selectedSkill = skills.find((skill) => skill.id === selectedID) ?? filteredSkills[0] ?? skills[0] ?? null;
-  const selectedSkillFull = isCurrentSkillRevision(selectedSkill, selectedSkillLoad.skill) ? selectedSkillLoad.skill : null;
-  const selectedContent = selectedSkillFull?.id === selectedSkill?.id ? selectedSkillFull?.content ?? null : null;
-  const selectedSkillApproved = selectedSkillFull?.approved ?? selectedSkill?.approved ?? false;
+  const selectedRow = selectedSkill ? skillRows.find((row) => row.id === selectedSkill.id) ?? null : null;
+  const selectedContent = selectedRow?.content ?? null;
+  const selectedSkillApproved = selectedRow ? selectedRow.approved_at !== null : false;
   const invitations = invitationLoad.invitations;
   const activeTeamMembers = teamMembers.filter((member) => member.status !== "pending");
   const pendingTeamMembers = teamMembers.filter((member) => member.status === "pending");
   const activeAPIKeys = apiKeys.filter((key) => !key.revoked_at && (!key.expires_at || new Date(key.expires_at).getTime() > Date.now()));
   const credentials = useMemo(() => dedupeCredentials(credentialRecords), [credentialRecords]);
 
+  // Identity is a computed join, not a table, so it stays a one-shot query.
+  // Workspace switches and invitation acceptance reload the page, which reruns
+  // this effect with the same token.
   useEffect(() => {
-    if (!sessionToken || !me || me.pending_only || !selectedSkill) {
-      setSelectedSkillLoad({ status: "idle", skill: null });
+    if (!sessionToken) {
+      setIdentityLoad({ status: "idle", me: null, workspaces: [] });
       return;
     }
 
     let cancelled = false;
-    setSelectedSkillLoad((current) => isCurrentSkillRevision(selectedSkill, current.skill)
-      ? current
-      : { status: "loading", skill: null });
-    void gonvex.query<Skill>(api.skills.get, { sessionToken, id: selectedSkill.id })
-      .then((skill) => {
-        if (!cancelled) setSelectedSkillLoad({ status: "ready", skill });
+    setIdentityLoad((current) => ({ ...current, status: "loading" }));
+    void Promise.all([
+      gonvex.query<MeResult>(api.auth.me, { sessionToken }),
+      gonvex.query<WorkspaceRecord[]>(api.auth.workspaces, { sessionToken }),
+    ])
+      .then(([nextMe, nextWorkspaces]) => {
+        if (!cancelled) setIdentityLoad({ status: "ready", me: nextMe, workspaces: nextWorkspaces });
       })
-      .catch(() => {
-        if (!cancelled) setSelectedSkillLoad({ status: "error", skill: null });
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setIdentityLoad({ status: "idle", me: null, workspaces: [] });
+        if (isInvalidSessionError(error)) {
+          sessionStorage.removeItem(sessionStorageKey);
+          setSessionToken("");
+          setAuthError("Your session expired. Sign in again.");
+          return;
+        }
+        setNotice(error instanceof Error ? error.message : "Could not load your account");
       });
 
     return () => {
       cancelled = true;
     };
-  }, [gonvex, me?.pending_only, selectedSkill?.id, selectedSkill?.updated_at, sessionToken]);
+  }, [gonvex, sessionToken]);
 
   useEffect(() => {
     if (!sessionToken) {
@@ -1194,10 +1286,9 @@ export default function App() {
               <div className="primaryActions">
                 {!selectedSkillApproved && isWorkspaceOwner ? (
                   <Button type="button" variant="accent" onClick={() => void runGuarded(async () => {
-                    const approved = await approveSkill({ sessionToken, id: selectedSkill.id }) as Skill;
-                    setSelectedSkillLoad({ status: "ready", skill: approved });
+                    await approveSkill({ sessionToken, id: selectedSkill.id });
                     setNotice("Approved skill for agent installation");
-                  })} disabled={selectedSkillFull === null}>
+                  })}>
                     <ShieldCheck size={16} /> Approve
                   </Button>
                 ) : null}

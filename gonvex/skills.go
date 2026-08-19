@@ -84,6 +84,7 @@ type MeResult struct {
 	Email          string `json:"email"`
 	Name           string `json:"name"`
 	IsOwner        bool   `json:"is_owner"`
+	WorkspaceID    string `json:"workspace_id"`
 	WorkspaceEmail string `json:"workspace_email"`
 	PendingOnly    bool   `json:"pending_only"`
 }
@@ -304,6 +305,7 @@ func Register(app *gonvex.App) {
 	app.Query("agent.credentials.get", AgentGetCredential)
 	app.Mutation("agent.credentials.save", AgentSaveCredential)
 	app.Mutation("agent.credentials.delete", AgentDeleteCredential)
+	registerSyncs(app)
 }
 
 func Login(ctx *gonvex.MutationCtx, args LoginArgs) (LoginResult, error) {
@@ -424,7 +426,7 @@ func Me(ctx *gonvex.QueryCtx, args SessionArgs) (MeResult, error) {
 	if err != nil {
 		return MeResult{}, err
 	}
-	result := MeResult{IsOwner: identity.IsWorkspaceOwner(), PendingOnly: identity.PendingOnly}
+	result := MeResult{IsOwner: identity.IsWorkspaceOwner(), WorkspaceID: identity.WorkspaceID, PendingOnly: identity.PendingOnly}
 	result.Email, result.Name, _ = lookupUser(ctx.Context, ctx.DB, identity.OwnerID)
 	if !result.IsOwner {
 		result.WorkspaceEmail, _, _ = lookupUser(ctx.Context, ctx.DB, identity.WorkspaceID)

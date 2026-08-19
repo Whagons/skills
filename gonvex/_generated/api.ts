@@ -25,6 +25,17 @@ export const api = {
     create: { kind: "mutation", path: "apiKeys.create" },
     list: { kind: "query", path: "apiKeys.list" },
     revoke: { kind: "mutation", path: "apiKeys.revoke" },
+    sync: {
+      kind: "sync",
+      optimistic: {
+        projection: {
+          entity: "skill_api_keys",
+          key: "id",
+          resultPath: [],
+        },
+      },
+      path: "apiKeys.sync",
+    },
   },
   auth: {
     login: { kind: "mutation", path: "auth.login" },
@@ -38,6 +49,17 @@ export const api = {
     get: { kind: "mutation", path: "credentials.get" },
     list: { kind: "query", path: "credentials.list" },
     save: { kind: "mutation", path: "credentials.save" },
+    sync: {
+      kind: "sync",
+      optimistic: {
+        projection: {
+          entity: "skill_credentials",
+          key: "id",
+          resultPath: [],
+        },
+      },
+      path: "credentials.sync",
+    },
   },
   skills: {
     approve: { kind: "mutation", path: "skills.approve" },
@@ -45,6 +67,17 @@ export const api = {
     get: { kind: "query", path: "skills.get" },
     list: { kind: "query", path: "skills.list" },
     save: { kind: "mutation", path: "skills.save" },
+    sync: {
+      kind: "sync",
+      optimistic: {
+        projection: {
+          entity: "skills",
+          key: "id",
+          resultPath: [],
+        },
+      },
+      path: "skills.sync",
+    },
   },
   team: {
     invitations: {
@@ -52,11 +85,73 @@ export const api = {
       list: { kind: "query", path: "team.invitations.list" },
       reject: { kind: "mutation", path: "team.invitations.reject" },
     },
+    invitationsSync: {
+      kind: "sync",
+      optimistic: {
+        projection: {
+          entity: "skill_workspace_invitations",
+          key: "id",
+          resultPath: [],
+        },
+      },
+      path: "team.invitationsSync",
+    },
     invite: { kind: "mutation", path: "team.invite" },
     list: { kind: "query", path: "team.list" },
+    membersSync: {
+      kind: "sync",
+      optimistic: {
+        projection: {
+          entity: "skill_workspace_members",
+          key: "id",
+          resultPath: [],
+        },
+      },
+      path: "team.membersSync",
+    },
     remove: { kind: "mutation", path: "team.remove" },
   },
 } as const;
 
 export const internal = api;
 export type Api = typeof api;
+
+export const optimisticWrites: Record<string, Array<{ table: string; columns?: string[] }>> = {
+};
+export const optimisticMutations: Record<string, { entity: string; rowIdPath: string[]; fieldsPath: string[] }> = {
+};
+
+export function optimisticPatchesFor(
+  path: string,
+  args: Record<string, unknown>,
+): Array<{ entity?: string; collection?: string; rowId: string; op: "patch"; fields: Record<string, unknown> }> {
+  const mutation = Object.prototype.hasOwnProperty.call(optimisticMutations, path)
+    ? optimisticMutations[path]
+    : undefined;
+  if (mutation) {
+    const readPath = (value: unknown, segments: string[]): unknown =>
+      segments.reduce<unknown>((current, segment) =>
+        current && typeof current === "object" ? (current as Record<string, unknown>)[segment] : undefined, value);
+    const rowId = String(readPath(args, mutation.rowIdPath) ?? args.id ?? args._id ?? "");
+    const nested = readPath(args, mutation.fieldsPath);
+    if (rowId && nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return [{ entity: mutation.entity, rowId, op: "patch" as const, fields: { ...(nested as Record<string, unknown>) } }];
+    }
+  }
+  const writes = optimisticWrites[path];
+  const rowId = String(args.id ?? args._id ?? "");
+  if (!Array.isArray(writes) || rowId === "") return [];
+
+  return writes.map(({ table, columns }) => ({
+    collection: table,
+    rowId,
+    op: "patch" as const,
+    fields: Object.fromEntries(
+      Object.entries(args).filter(([key]) =>
+        columns
+          ? columns.includes(key)
+          : key !== "id" && key !== "_id" && key !== "tenantId",
+      ),
+    ),
+  }));
+}
