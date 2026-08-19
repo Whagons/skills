@@ -69,7 +69,7 @@ test("production nginx sends baseline browser security headers", async () => {
 });
 
 test("patched Gonvex dev wrapper cannot leak project keys to URLs or child env", async () => {
-  const patch = await source("patches/@gonvex__cli@0.1.10.patch");
+  const patch = await source("patches/@gonvex__cli@0.1.31.patch");
   assert.match(patch, /env: publicChildEnvironment\(\)/);
   assert.match(patch, /sensitiveName/);
   assert.match(patch, /authenticated browser log streaming is disabled/);

@@ -1,8 +1,8 @@
 diff --git a/dist/index.js b/dist/index.js
-index 7323d48cb15cd91e66bac45b54a6b155109a625b..e2ef1afdf9dff2fa66db6bb2930822f5bfe1f84f 100755
+index 7f4d49b3183cf94faeb83178bcbc63e0ba33f172..71a5f46e3fca35fc927bb77364834a9f9e24d9fb 100755
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -405,6 +405,7 @@ async function runDev(argv) {
+@@ -410,6 +410,7 @@ async function runDev(argv) {
              stdio: "inherit",
              signal: controller.signal,
              shell: process.platform === "win32",
@@ -10,7 +10,7 @@ index 7323d48cb15cd91e66bac45b54a6b155109a625b..e2ef1afdf9dff2fa66db6bb2930822f5
          });
          const code = await new Promise((resolve) => child.on("exit", resolve));
          controller.abort();
-@@ -1558,18 +1559,34 @@ function envLineValue(line) {
+@@ -1932,18 +1933,34 @@ function envLineValue(line) {
  function webSocketURL(runtimeURL) {
      return runtimeURL.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
  }
