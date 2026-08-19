@@ -848,8 +848,11 @@ func ApproveSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (Skill, error) 
 	if len(id) > 240 {
 		return Skill{}, errors.New("skill id is too long")
 	}
-	result, err := mutationRunner(ctx).ExecContext(ctx.Context, `
-		update skills set approved_at = now(), approved_by = $1
+	runner := mutationRunner(ctx)
+	// updated_at must move so revision-keyed clients (UI detail cache, CLI
+	// sync) refetch the approved row instead of holding the pending one.
+	result, err := runner.ExecContext(ctx.Context, `
+		update skills set approved_at = now(), approved_by = $1, updated_at = now()
 		where owner_id = $2 and id = $3
 	`, identity.OwnerID, identity.WorkspaceID, id)
 	if err != nil {
@@ -859,7 +862,10 @@ func ApproveSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (Skill, error) 
 	if count == 0 {
 		return Skill{}, errors.New("skill not found")
 	}
-	return getSkill(ctx.Context, ctx.DB, identity.WorkspaceID, id, "", false)
+	// Read back through the mutation transaction; ctx.DB is a different
+	// connection and cannot see the uncommitted approval, so it returns the
+	// row still marked pending and the UI keeps showing the Approve button.
+	return getSkill(ctx.Context, runner, identity.WorkspaceID, id, "", false)
 }
 
 func DeleteSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (DeleteResult, error) {
@@ -1343,7 +1349,7 @@ func listSkills(ctx context.Context, db *sql.DB, ownerID string, approvedOnly bo
 	return skills, nil
 }
 
-func getSkill(ctx context.Context, db *sql.DB, ownerID string, id string, name string, approvedOnly bool) (Skill, error) {
+func getSkill(ctx context.Context, db execQueryer, ownerID string, id string, name string, approvedOnly bool) (Skill, error) {
 	if db == nil {
 		return Skill{}, errors.New("database is not configured")
 	}
