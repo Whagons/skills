@@ -103,6 +103,12 @@ WHAGONS_SKILLS_API_KEY=skv_... \
 node scripts/import-local-credentials.mjs
 ```
 
+### Durable sync storage (production)
+
+The vault UI renders skills, API keys, credentials, and team rows from Gonvex sync collections (`gonvex/syncs.go`). Those collections need the runtime's durable change log (`_gonvex_sync_clock`, `_gonvex_sync_changes`, per-table triggers) inside the project database. The runtime only installs that storage while applying *tenant* schemas; every vault table is a tenant table and this single-mode project has no tenant targets, so the runtime never installs it and every sync subscribe fails with `relation "_gonvex_sync_clock" does not exist` (a black screen after login).
+
+`scripts/install-sync-storage.sql` is the idempotent install, generated from the runtime's own `schema/sync.go`. Re-generate and re-apply it whenever a sync definition changes its table, key, or projected columns; verify with `select to_regclass('public._gonvex_sync_clock')`.
+
 ## Auth model
 
 The UI uses Google Identity Services. The browser sends a Google ID token to the Gonvex backend, which verifies it against `https://oauth2.googleapis.com/tokeninfo` (audience, verified email) before creating a session. Sessions store both who logged in and which workspace they access; invited members resolve to the inviter's workspace.
