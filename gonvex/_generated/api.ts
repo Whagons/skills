@@ -117,6 +117,27 @@ export const internal = api;
 export type Api = typeof api;
 
 export const optimisticWrites: Record<string, Array<{ table: string; columns?: string[] }>> = {
+  "agent.apiKeys.revoke": [{"table":"skill_api_keys"}],
+  "agent.apiKeys.revokeSelf": [{"table":"skill_api_keys"}],
+  "agent.credentials.delete": [{"table":"skill_credentials"}],
+  "agent.credentials.save": [{"table":"skill_credentials"}],
+  "agent.skills.delete": [{"table":"skills"}],
+  "agent.skills.upload": [{"table":"skills"}],
+  "apiKeys.create": [{"table":"skill_api_keys"}],
+  "apiKeys.revoke": [{"table":"skill_api_keys"}],
+  "auth.login": [{"table":"skill_users"},{"table":"skill_sessions"}],
+  "auth.logout": [{"table":"skill_sessions"}],
+  "auth.switchWorkspace": [{"table":"skill_sessions"}],
+  "credentials.delete": [{"table":"skill_credentials"}],
+  "credentials.get": [{"table":"skill_credentials"}],
+  "credentials.save": [{"table":"skill_credentials"}],
+  "skills.approve": [{"table":"skills"}],
+  "skills.delete": [{"table":"skills"}],
+  "skills.save": [{"table":"skills"}],
+  "team.invitations.accept": [{"table":"skill_workspace_members"},{"table":"skill_workspace_invitations"},{"table":"skill_sessions"}],
+  "team.invitations.reject": [{"table":"skill_workspace_invitations"},{"table":"skill_sessions"}],
+  "team.invite": [{"table":"skill_workspace_invitations"},{"table":"skill_workspace_members"}],
+  "team.remove": [{"table":"skill_workspace_members"},{"table":"skill_workspace_invitations"}],
 };
 export const optimisticMutations: Record<string, { entity: string; rowIdPath: string[]; fieldsPath: string[] }> = {
 };

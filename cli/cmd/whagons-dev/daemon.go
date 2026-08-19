@@ -91,7 +91,7 @@ func syncConfiguredOnce() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(result.Removed) > 0 || len(result.Preserved) > 0 {
+	if len(result.Removed) > 0 || len(result.Preserved) > 0 || len(result.Skipped) > 0 {
 		reportSkillSync(result, targets)
 	}
 	return result.Revision, nil

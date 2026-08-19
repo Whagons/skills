@@ -46,6 +46,7 @@ type SkillSyncResult struct {
 	Installed int
 	Removed   []string
 	Preserved []string
+	Skipped   []string
 	Links     map[string]LinkResult
 	Revision  string
 }
@@ -411,6 +412,17 @@ func syncManagedSkills(client *Client, apiKey string, config *Config, targets []
 	for _, meta := range metadata {
 		var skill Skill
 		if err := client.Query("agent.skills.get", map[string]any{"apiKey": apiKey, "id": meta.ID}, &skill); err != nil {
+			// A skill can drop out between list and get: approval reset by a
+			// re-upload, or deletion. That is a definitive server answer for
+			// one skill, not a sync failure — keep the local copy and finish
+			// syncing the rest instead of aborting the whole run.
+			if strings.Contains(err.Error(), "skill not found") {
+				if name := safePathName(meta.Name); name != "" && !active[name] {
+					active[name] = true
+					result.Skipped = append(result.Skipped, name)
+				}
+				continue
+			}
 			return result, fmt.Errorf("fetch %s: %w", meta.Name, err)
 		}
 		name := safePathName(skill.Name)
@@ -566,6 +578,9 @@ func reportSkillSync(result SkillSyncResult, targets []string) {
 	}
 	if len(result.Preserved) > 0 {
 		fmt.Printf("! Preserved locally modified managed skills: %s\n", strings.Join(result.Preserved, ", "))
+	}
+	if len(result.Skipped) > 0 {
+		fmt.Printf("! Kept local copies of skills the vault no longer serves (pending approval or deleted): %s\n", strings.Join(result.Skipped, ", "))
 	}
 	for target, links := range result.Links {
 		if len(links.Conflicts) > 0 {
