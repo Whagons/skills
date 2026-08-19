@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { dedupeCredentials } from "../src/lib/credentials.ts";
 import { invitationInstructions } from "../src/lib/invitations.ts";
-import { isCurrentSkillRevision } from "../src/lib/skill-review.ts";
 import { readVaultTab, vaultURLForTab, vaultURLWithoutCLIAuth } from "../src/lib/vault-state.ts";
 
 async function source(path: string) {
@@ -111,18 +110,15 @@ test("the credential vault collapses legacy duplicate metadata before rendering"
   assert.deepEqual(credentials.map(({ id }) => id), ["cloudflare", "scoped"]);
 });
 
-test("skill review never presents cached content from an older revision", async () => {
-  const metadata = { id: "skill-1", updated_at: "2026-08-13T18:00:00Z" };
-  const staleDetail = { id: "skill-1", updated_at: "2026-08-12T18:00:00Z" };
-  const currentDetail = { id: "skill-1", updated_at: "2026-08-13T18:00:00Z" };
-
-  assert.equal(isCurrentSkillRevision(metadata, staleDetail), false);
-  assert.equal(isCurrentSkillRevision(metadata, currentDetail), true);
-
+test("skill content renders from the durable sync collection, not a cached detail query", async () => {
   const app = await source("src/App.tsx");
-  assert.match(app, /gonvex\.query<Skill>\(api\.skills\.get/);
-  assert.match(app, /const approved = await approveSkill/);
-  assert.match(app, /setSelectedSkillLoad\([^;]*approved/s);
+  assert.match(app, /useSync<SkillRow>\(api\.skills\.sync/);
+  assert.match(app, /selectedRow\?\.content \?\? null/);
+  assert.match(app, /approved_at !== null/);
+  // The old imperative detail fetch pinned a pre-commit approve result and
+  // kept the Approve button visible; nothing may reintroduce it.
+  assert.doesNotMatch(app, /api\.skills\.get/);
+  assert.doesNotMatch(app, /useQuery[<(]/);
 });
 
 test("sync projections never include secret-bearing columns", async () => {
