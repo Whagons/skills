@@ -94,6 +94,9 @@ func verifyWorkspaceSync(ctx *gonvex.QueryCtx, args WorkspaceSyncArgs) (sessionI
 	if identity.PendingOnly {
 		return sessionIdentity{}, errors.New("accept or reject the pending workspace invitation first")
 	}
+	if !identity.IsWorkspaceOwner() {
+		return sessionIdentity{}, errors.New("members must use permission-filtered queries")
+	}
 	if strings.TrimSpace(args.OwnerID) != identity.WorkspaceID {
 		return sessionIdentity{}, errors.New("ownerId does not match the active workspace")
 	}

@@ -38,6 +38,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./com
 import { Input } from "./components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip";
 import { getAuthErrorMessage } from "./lib/auth-error";
+import { AccessRoles } from "./components/AccessRoles";
+import { accessAPI, canAccess, resourceSummary, type AccessState } from "./lib/access";
 import { dedupeCredentials } from "./lib/credentials";
 import { invitationInstructions } from "./lib/invitations";
 import {
@@ -62,6 +64,7 @@ type Skill = SkillMeta & {
 };
 
 type APIKeyRecord = {
+  can_revoke?: boolean;
   id: string;
   name: string;
   prefix: string;
@@ -445,6 +448,12 @@ export default function App() {
   const [credentialSecrets, setCredentialSecrets] = useState<Record<string, string>>({});
   const [credentialLoadingID, setCredentialLoadingID] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRoleID, setInviteRoleID] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [accessState, setAccessState] = useState<AccessState | null>(null);
+  const [accessReload, setAccessReload] = useState(0);
+  const [accessError, setAccessError] = useState("");
+  const [memberVault, setMemberVault] = useState<{ skills: SkillRow[]; credentials: CredentialRow[]; keys: APIKeyRecord[] } | null>(null);
   const [invitationReload, setInvitationReload] = useState(0);
   const [invitationLoad, setInvitationLoad] = useState<InvitationLoad>({ status: "idle", invitations: [], error: "" });
   const [identityLoad, setIdentityLoad] = useState<IdentityLoad>({ status: "idle", me: null, workspaces: [] });
@@ -452,16 +461,16 @@ export default function App() {
   const gonvex = useConvex();
   const me = identityLoad.me;
   const workspaces = identityLoad.workspaces;
-  // Everything workspace-scoped renders from durable sync collections instead
-  // of query subscriptions: rows come from IndexedDB first, then row-level
-  // deltas. ownerId pins each collection to the active workspace; the handler
-  // rejects a mismatch.
-  const syncArgs = sessionToken && me && !me.pending_only && me.workspace_id
+  // Only owners subscribe to workspace-wide durable collections. Member
+  // snapshots recheck the current role and never persist forbidden rows.
+  const syncArgs = sessionToken && me?.is_owner && !me.pending_only && me.workspace_id
     ? { sessionToken, ownerId: me.workspace_id }
     : "skip" as const;
-  const skillRows = useSync<SkillRow>(api.skills.sync, syncArgs) ?? [];
+  const syncedSkillRows = useSync<SkillRow>(api.skills.sync, syncArgs) ?? [];
+  const skillRows = me?.is_owner ? syncedSkillRows : memberVault?.skills ?? [];
   const apiKeyRows = useSync<APIKeyRow>(api.apiKeys.sync, syncArgs) ?? [];
-  const credentialRows = useSync<CredentialRow>(api.credentials.sync, syncArgs) ?? [];
+  const syncedCredentialRows = useSync<CredentialRow>(api.credentials.sync, syncArgs) ?? [];
+  const credentialRows = me?.is_owner ? syncedCredentialRows : memberVault?.credentials ?? [];
   const memberRows = useSync<MemberRow>(api.team.membersSync, syncArgs) ?? [];
   const invitationRows = useSync<InvitationRow>(
     api.team.invitationsSync,
@@ -477,7 +486,7 @@ export default function App() {
       updated_at: row.updated_at,
       approved: row.approved_at !== null,
     })), [skillRows]);
-  const apiKeys = useMemo<APIKeyRecord[]>(() => [...apiKeyRows]
+  const syncedAPIKeys = useMemo<APIKeyRecord[]>(() => [...apiKeyRows]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .map((row) => ({
       id: row.id,
@@ -488,6 +497,7 @@ export default function App() {
       expires_at: row.expires_at,
       scopes: row.scopes.split(",").map((scope) => scope.trim()).filter(Boolean),
     })), [apiKeyRows]);
+  const apiKeys = me?.is_owner ? syncedAPIKeys : memberVault?.keys ?? [];
   const credentialRecords = useMemo<CredentialMeta[]>(() => [...credentialRows]
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at)), [credentialRows]);
   const teamMembers = useMemo<TeamMember[]>(() => [
@@ -510,7 +520,31 @@ export default function App() {
   const removeMember = useMutation(api.team.remove);
   const acceptInvitation = useMutation(api.team.invitations.accept);
   const rejectInvitation = useMutation(api.team.invitations.reject);
-  const isWorkspaceOwner = me?.is_owner ?? true;
+  const isWorkspaceOwner = me?.is_owner ?? false;
+  const allowed = (scope: string, id = "") => isWorkspaceOwner || canAccess(accessState?.role, scope, id);
+  const permittedKeyScopes = isWorkspaceOwner ? cliScopes : accessState?.role.scopes ?? [];
+  const saveRole = useMutation(accessAPI.saveRole);
+  const deleteRole = useMutation(accessAPI.deleteRole);
+  const assignRole = useMutation(accessAPI.assignRole);
+
+  useEffect(() => {
+    if (!sessionToken || !me || me.pending_only) { setAccessState(null); setMemberVault(null); return; }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
+        const state = await gonvex.query(accessAPI.state, { sessionToken }) as AccessState;
+        const vault = me?.is_owner ? null : await gonvex.query(accessAPI.vault, { sessionToken }) as NonNullable<typeof memberVault>;
+        if (!cancelled) { setAccessState(state); setMemberVault(vault); setAccessError(""); }
+      } catch (error) {
+        if (!cancelled) { setAccessState(null); setMemberVault(null); setCredentialSecrets({}); setAccessError(error instanceof Error ? error.message : "Could not load permissions"); }
+      } finally { if (!cancelled) timer = setTimeout(() => void refresh(), 5000); }
+    }
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [gonvex, sessionToken, me?.workspace_id, me?.is_owner, me?.pending_only, accessReload]);
+  const roleRevision = JSON.stringify(accessState?.role);
+  useEffect(() => { setCredentialSecrets({}); setCredentialDraft(emptyCredentialDraft); }, [roleRevision]);
   const cliCallbackURL = cliAuthRequest?.state ? parseLoopbackCallback(cliAuthRequest.callback) : null;
 
   const filteredSkills = useMemo(() => {
@@ -715,6 +749,7 @@ export default function App() {
   async function runGuarded(action: () => Promise<void>) {
     try {
       await action();
+      setAccessReload(value => value + 1);
     } catch (error) {
       if (isInvalidSessionError(error)) {
         sessionStorage.removeItem(sessionStorageKey);
@@ -747,7 +782,7 @@ export default function App() {
       const result = await createAPIKey({
         sessionToken,
         name,
-        scopes: apiKeyScopes,
+        scopes: apiKeyScopes.filter(scope => permittedKeyScopes.includes(scope)),
         expires_in_days: neverExpires ? 0 : Number(apiKeyExpiry),
         never_expires: neverExpires,
       }) as CreateAPIKeyResult;
@@ -772,7 +807,7 @@ export default function App() {
     const result = await createAPIKey({
       sessionToken,
       name: `${request.name} ${new Date().toLocaleString()}`,
-      scopes: cliScopes,
+      scopes: permittedKeyScopes,
       expires_in_days: cliAPIKeyLifetimeDays,
     }) as CreateAPIKeyResult;
     const payload = {
@@ -814,12 +849,14 @@ export default function App() {
   async function submitInvite(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const email = inviteEmail.trim();
-    if (!email) return;
+    if (!email || !inviteRoleID || inviteBusy) return;
+    setInviteBusy(true);
     await runGuarded(async () => {
-      await inviteMember({ sessionToken, email }) as TeamMember;
+      await inviteMember({ sessionToken, email, role_id: inviteRoleID }) as TeamMember;
       setInviteEmail("");
       setNotice(`Invitation created for ${email}. Copy and send the sign-in instructions.`);
     });
+    setInviteBusy(false);
   }
 
   async function copyInvitation(member: TeamMember) {
@@ -1242,7 +1279,7 @@ export default function App() {
             </div>
             <div className="primaryActions">
               {cliCallbackURL ? (
-                <Button type="button" variant="accent" onClick={() => void authorizeCLI()}>
+                <Button type="button" variant="accent" disabled={permittedKeyScopes.length === 0} onClick={() => void authorizeCLI()}>
                   <KeyRound size={16} />
                   Authorize CLI
                 </Button>
@@ -1328,6 +1365,7 @@ export default function App() {
                       variant="ghost"
                       size="icon"
                       aria-label="Delete skill"
+                      disabled={!allowed("skills:write", selectedSkill.id)}
                       className="dangerButton"
                       onClick={() => void removeSkill(selectedSkill)}
                     >
@@ -1404,7 +1442,7 @@ export default function App() {
               <Card className="settingsCard">
                 <CardHeader>
                   <div className="settingsIcon"><Fingerprint size={19} /></div>
-                  <div><CardTitle>Active keys</CardTitle><CardDescription>Keys with live access to this workspace.</CardDescription></div>
+                  <div><CardTitle>Active keys</CardTitle><CardDescription>Your keys and any workspace keys your role can view.</CardDescription></div>
                 </CardHeader>
                 <CardContent className="apiContent">
                   <form className="apiKeyCreateForm" onSubmit={(event) => void makeAPIKey(event)}>
@@ -1428,7 +1466,7 @@ export default function App() {
                         ["credentials:write", "Manage credentials"],
                         ["keys:read", "List API keys"],
                         ["keys:revoke", "Revoke other keys"],
-                      ].map(([scope, label]) => (
+                      ].filter(([scope]) => permittedKeyScopes.includes(scope)).map(([scope, label]) => (
                         <label key={scope}><input type="checkbox" checked={apiKeyScopes.includes(scope)} onChange={() => toggleAPIKeyScope(scope)} /><span>{label}</span></label>
                       ))}
                     </fieldset>
@@ -1442,7 +1480,7 @@ export default function App() {
                         <option value="never">Never expires</option>
                       </select>
                     </label>
-                    <Button type="submit" variant="accent" disabled={apiKeyScopes.length === 0}>
+                    <Button type="submit" variant="accent" disabled={!apiKeyScopes.some(scope => permittedKeyScopes.includes(scope))}>
                       <KeyRound size={16} />
                       Create key
                     </Button>
@@ -1459,7 +1497,7 @@ export default function App() {
                   ) : null}
                   <div className="keyList">
                     {activeAPIKeys.length === 0 ? (
-                      <span className="mutedText">No active API keys.</span>
+                      <span className="mutedText">No active API keys visible to you.</span>
                     ) : activeAPIKeys.map((key) => (
                       <div className="keyRow" key={key.id}>
                         <div>
@@ -1470,6 +1508,7 @@ export default function App() {
                           type="button"
                           variant="ghost"
                           className="dangerButton"
+                          disabled={!isWorkspaceOwner && !key.can_revoke}
                           onClick={() => void runGuarded(async () => {
                             await revokeAPIKey({ sessionToken, id: key.id });
                             setNotice("Revoked API key");
@@ -1512,7 +1551,7 @@ export default function App() {
               </div>
             </header>
             <div className="settingsLayout settingsColumns">
-              <Card className="settingsCard">
+              {allowed("credentials:write", credentialDraft.id) ? <Card className="settingsCard">
                 <CardHeader>
                   <div className="settingsIcon">{credentialDraft.id ? <Pencil size={19} /> : <Plus size={19} />}</div>
                   <div>
@@ -1526,7 +1565,7 @@ export default function App() {
                     <label><span>Description</span><Input value={credentialDraft.summary} onChange={(event) => setCredentialDraft((current) => ({ ...current, summary: event.target.value }))} placeholder="What this credential unlocks" /></label>
                     <label><span>Secret value</span><Input value={credentialDraft.value} onChange={(event) => setCredentialDraft((current) => ({ ...current, value: event.target.value }))} placeholder="Paste the secret value" type="password" autoComplete="new-password" maxLength={262144} required /></label>
                     <div className="credentialFormActions">
-                      <Button type="submit" variant="accent" disabled={credentialSaving}>
+                      <Button type="submit" variant="accent" disabled={credentialSaving || !allowed("credentials:write", credentialDraft.id)}>
                         {credentialDraft.id ? <Pencil size={16} /> : <Plus size={16} />}
                         {credentialSaving ? "Saving…" : credentialDraft.id ? "Update credential" : "Store credential"}
                       </Button>
@@ -1539,7 +1578,7 @@ export default function App() {
                     </div>
                   </form>
                 </CardContent>
-              </Card>
+              </Card> : null}
 
               <Card className="settingsCard">
                 <CardHeader>
@@ -1568,8 +1607,7 @@ export default function App() {
                             type="button"
                             variant="outline"
                             size="sm"
-                            disabled={credentialLoadingID === credential.id}
-                            onClick={() => void editCredential(credential)}
+                            disabled={credentialLoadingID === credential.id || !allowed("credentials:write", credential.id)} onClick={() => void editCredential(credential)}
                           >
                             <Pencil size={16} />
                             Edit
@@ -1604,6 +1642,7 @@ export default function App() {
                             size="icon"
                             className="dangerButton"
                             aria-label={`Delete ${credential.name}`}
+                            disabled={!allowed("credentials:write", credential.id)}
                             onClick={() => void runGuarded(async () => {
                               await deleteCredential({ sessionToken, id: credential.id });
                               setNotice(`Deleted ${credential.name}`);
@@ -1626,7 +1665,7 @@ export default function App() {
             <header className="mainHeader">
               <div className="headerCopy">
                 <p className="eyebrow"><span>Workspace</span> / People</p>
-                <h2>Team</h2>
+                <h2>Team & access</h2>
                 <p className="summaryLine">
                   {isWorkspaceOwner
                     ? "Invite teammates by their exact Google email, then send them the sign-in instructions. They explicitly accept before gaining access."
@@ -1634,6 +1673,11 @@ export default function App() {
                 </p>
               </div>
             </header>
+            {accessError ? <p className="memberAccessNotice" role="alert">{accessError} <Button type="button" variant="ghost" size="sm" onClick={() => setAccessReload(value => value + 1)}>Retry</Button></p> : null}
+            {isWorkspaceOwner ? <AccessRoles state={accessState} skills={skills} credentials={credentials}
+              onSave={async role => { await saveRole({ sessionToken, role }); setAccessReload(value => value + 1); setNotice("Role saved. Access changes apply to members and their API keys."); }}
+              onDelete={async id => { await deleteRole({ sessionToken, id }); setAccessReload(value => value + 1); setNotice("Role deleted"); }}
+            /> : accessState ? <div className="memberAccessNotice"><strong>Your role: {accessState.role.name}</strong><p>{resourceSummary(accessState.role, "skills")} · {resourceSummary(accessState.role, "credentials")}</p>Contact the workspace owner to change your access.</div> : null}
             <div className="settingsLayout settingsColumns">
               {invitations.length > 0 ? (
                 <Card className="settingsCard">
@@ -1687,13 +1731,15 @@ export default function App() {
                   <CardContent className="apiContent">
                     <form className="credentialForm" onSubmit={(event) => void submitInvite(event)}>
                       <label><span>Email address</span><Input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="teammate@whagons.com" type="email" required /></label>
-                      <Button type="submit" variant="accent">
+                      <label><span>Role</span><select value={inviteRoleID} onChange={event => setInviteRoleID(event.target.value)} required disabled={!accessState || inviteBusy}><option value="" disabled>Choose a role</option>{accessState?.roles.map(role => <option value={role.id} key={role.id}>{role.name}</option>)}</select></label>
+                      {accessState?.roles.filter(role => role.id === inviteRoleID).map(role => <p className="selectionHint" key={role.id}>{resourceSummary(role, "skills")}<br />{resourceSummary(role, "credentials")}</p>)}
+                      <Button type="submit" variant="accent" disabled={!inviteRoleID || !accessState || inviteBusy}>
                         <Plus size={16} />
-                        Invite member
+                        {inviteBusy ? "Inviting…" : "Invite member"}
                       </Button>
                     </form>
                     <span className="mutedText">
-                      The vault does not send an email. After inviting, use Copy invite below and send those instructions yourself. Accepted members get full access to skills, credentials, and API keys.
+                      The vault does not send an email. After inviting, use Copy invite below and send those instructions yourself. Members receive the selected role. You can change their role at any time.
                     </span>
                   </CardContent>
                 </Card>
@@ -1707,7 +1753,7 @@ export default function App() {
                 <CardContent className="apiContent">
                   <div className="keyList">
                     {teamMembers.length === 0 ? (
-                      <span className="mutedText">No teammates yet. This workspace is only accessible to its owner.</span>
+                      <span className="mutedText">{isWorkspaceOwner ? "No teammates yet. Invite someone and choose their role above." : "Only the workspace owner can view the team roster."}</span>
                     ) : teamMembers.map((member) => (
                       <div className="keyRow" key={member.id}>
                         <div>
@@ -1719,6 +1765,7 @@ export default function App() {
                         </div>
                         {isWorkspaceOwner ? (
                           <div className="rowActions">
+                            <select className="memberRoleSelect" aria-label={`Role for ${member.email}`} value={accessState?.assignments[member.id] ?? ""} disabled={!accessState} onChange={event => { const role_id = event.target.value; void runGuarded(async () => { await assignRole({ sessionToken, id: member.id, role_id }); setNotice(`Updated access for ${member.email}`); }); }}><option value="" disabled>Loading role…</option>{accessState?.roles.map(role => <option value={role.id} key={role.id}>{role.name}</option>)}</select>
                             {member.status === "pending" ? (
                               <Button type="button" variant="outline" size="sm" onClick={() => void copyInvitation(member)}>
                                 <Clipboard size={14} /> Copy invite
@@ -1744,6 +1791,7 @@ export default function App() {
           </>
         ) : null}
 
+        {accessError && activeTab !== "team" ? <p className="memberAccessNotice" role="alert">Could not load workspace permissions: {accessError}</p> : null}
         {notice ? (
           <div className="noticeToast">
             <Check size={16} />

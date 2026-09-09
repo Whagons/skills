@@ -18,7 +18,7 @@ test("browser-authorized CLI keys are scoped and expire after one year", async (
   const backend = await source("gonvex/skills.go");
 
   assert.match(app, /const cliAPIKeyLifetimeDays = 365/);
-  assert.match(app, /scopes: cliScopes,[\s\S]{0,100}expires_in_days: cliAPIKeyLifetimeDays/);
+  assert.match(app, /scopes: permittedKeyScopes,[\s\S]{0,100}expires_in_days: cliAPIKeyLifetimeDays/);
   assert.match(backend, /maxAPIKeyTTL\s+= 365 \* 24 \* time\.Hour/);
 });
 

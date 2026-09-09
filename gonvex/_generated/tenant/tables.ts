@@ -3,6 +3,36 @@
 export const scope = "tenant" as const;
 
 export const tables = {
+  skill_access_roles: {
+    columns: {
+      id: {
+        nullable: false,
+        primaryKey: true,
+        type: "id",
+      },
+      name: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      policy: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      workspace_owner_id: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+    },
+    indexes: {
+      by_workspace: {
+        columns: ["workspace_owner_id"],
+        unique: false,
+      },
+    },
+  },
   skill_api_keys: {
     columns: {
       created_at: {
@@ -238,6 +268,11 @@ export const tables = {
         primaryKey: false,
         type: "time",
       },
+      role_id: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
       workspace_owner_id: {
         nullable: false,
         primaryKey: false,
@@ -273,6 +308,11 @@ export const tables = {
         type: "id",
       },
       invited_by: {
+        nullable: false,
+        primaryKey: false,
+        type: "string",
+      },
+      role_id: {
         nullable: false,
         primaryKey: false,
         type: "string",

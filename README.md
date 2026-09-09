@@ -46,7 +46,7 @@ All data (skills, credentials, API keys) belongs to a **workspace**, owned by th
 - do not receive an automatic email, so the owner copies and sends the sign-in instructions shown beside a pending invite,
 - must use the exact Google email address entered by the owner,
 - sign in with their own Google account and explicitly accept the invitation,
-- see and manage all skills, credentials, and API keys in the owner's workspace,
+- receive the role selected by the owner, with access to selected skills and credentials,
 - lose access immediately when removed (their active sessions and keys are revoked).
 
 Login is allowed for accounts that are either invited members or covered by the runtime allowlist:
@@ -58,6 +58,28 @@ SKILLS_LEGACY_OWNER_EMAIL=you@example.com
 ```
 
 If neither `SKILLS_ALLOWED_EMAILS` nor `SKILLS_ALLOWED_DOMAINS` is set, only `malek.gabriel33@gmail.com` can own a workspace. `SKILLS_LEGACY_OWNER_EMAIL` claims pre-owner-migration rows for that Google user only. An allowlisted owner always lands in their own workspace; an invitation never silently redirects that account.
+
+## Roles and permissions
+
+In **Team & access**, choose **Create role**, name the role, and select its permissions. Skills and credentials each have **No access**, **Read**, and **Read & edit** levels. Choose individual items or **All**, which includes future items. Read access to a credential includes revealing and copying its secret. Editing includes deletion; creating new items requires All access for that resource type.
+
+Select a role when inviting a Google account. Use the role selector beside an active member or pending invitation to change it. Changes also restrict previously created API keys on their next request. Members can create keys only within their current role and can always view and revoke their own keys. Separate permissions control viewing and revoking other workspace keys. Only the workspace owner can invite people, assign roles, or edit roles.
+
+Existing memberships and pending invitations retain **Full access** during migration. New invitations require an explicit role choice. Full access is a built-in role; ownership and team administration remain with the owner. Assigned roles cannot be deleted until their members and pending invitations are reassigned.
+
+Owners retain durable workspace sync. Members use permission-filtered snapshots refreshed every five seconds and after their own mutations. The server rejects member subscriptions to workspace-wide sync, and enforces resource grants for browser and CLI reads and writes. Previously downloaded content or copied secrets cannot be recalled by changing a role.
+
+Deploy the backend schema and functions together with the frontend. `npx gonvex codegen` only updates local bindings; it does not deploy. The backend migration adds the role table and role IDs on memberships and invitations. Existing sync projections are unchanged, so this change does not require regenerating the durable sync SQL.
+
+### Access tests
+
+```bash
+npm test
+npm run build
+GONVEX_SOURCE_ROOT=/path/to/gonvex bash scripts/test-backend.sh
+```
+
+Set `SKILLS_TEST_DATABASE_URL` to an empty disposable PostgreSQL database to run the integration cases. They cover filtered lists, ID/name lookups, invitation acceptance, cross-workspace access, key escalation, role downgrades, and member removal. The test creates tables and fixture rows, so never point it at a shared or production database.
 
 ## Local development
 

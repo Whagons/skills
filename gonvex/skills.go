@@ -90,6 +90,7 @@ type MeResult struct {
 }
 
 type InviteMemberArgs struct {
+	RoleID       string `json:"role_id"`
 	SessionToken string `json:"sessionToken"`
 	Email        string `json:"email"`
 }
@@ -228,6 +229,7 @@ type DeleteResult struct {
 }
 
 type APIKeyRecord struct {
+	CanRevoke bool       `json:"can_revoke"`
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"`
@@ -273,42 +275,43 @@ type execQueryer interface {
 // until process restart — approvals and uploads made through one surface were
 // invisible to the other.
 func Register(app *gonvex.App) {
+	registerAccess(app)
 	app.Mutation("auth.login", Login, gonvex.Writes("skill_users", "skill_sessions"))
 	app.Mutation("auth.logout", Logout, gonvex.Writes("skill_sessions"))
-	app.Query("auth.me", Me, gonvex.Reads("skill_sessions", "skill_users"))
-	app.Query("auth.workspaces", ListWorkspaces, gonvex.Reads("skill_sessions", "skill_users", "skill_workspace_members"))
+	app.Query("auth.me", Me, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_sessions", "skill_users"))
+	app.Query("auth.workspaces", ListWorkspaces, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_sessions", "skill_users", "skill_workspace_members"))
 	app.Mutation("auth.switchWorkspace", SwitchWorkspace, gonvex.Writes("skill_sessions"))
-	app.Query("team.list", ListTeamMembers, gonvex.Reads("skill_workspace_members", "skill_workspace_invitations"))
+	app.Query("team.list", ListTeamMembers, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_workspace_members", "skill_workspace_invitations"))
 	app.Mutation("team.invite", InviteTeamMember, gonvex.Writes("skill_workspace_invitations", "skill_workspace_members"))
-	app.Mutation("team.remove", RemoveTeamMember, gonvex.Writes("skill_workspace_members", "skill_workspace_invitations"))
-	app.Query("team.invitations.list", ListInvitations, gonvex.Reads("skill_workspace_invitations", "skill_users"))
+	app.Mutation("team.remove", RemoveTeamMember, gonvex.Writes("skill_workspace_members", "skill_workspace_invitations", "skill_sessions", "skill_api_keys"))
+	app.Query("team.invitations.list", ListInvitations, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_workspace_invitations", "skill_users"))
 	app.Mutation("team.invitations.accept", AcceptInvitation, gonvex.Writes("skill_workspace_members", "skill_workspace_invitations", "skill_sessions"))
 	app.Mutation("team.invitations.reject", RejectInvitation, gonvex.Writes("skill_workspace_invitations", "skill_sessions"))
-	app.Query("skills.list", ListSkills, gonvex.Reads("skills"))
-	app.Query("skills.get", GetSkill, gonvex.Reads("skills"))
+	app.Query("skills.list", ListSkills, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skills"))
+	app.Query("skills.get", GetSkill, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skills"))
 	app.Mutation("skills.save", SaveSkill, gonvex.Writes("skills"))
 	app.Mutation("skills.approve", ApproveSkill, gonvex.Writes("skills"))
 	app.Mutation("skills.delete", DeleteSkill, gonvex.Writes("skills"))
-	app.Query("apiKeys.list", ListAPIKeys, gonvex.Reads("skill_api_keys"))
+	app.Query("apiKeys.list", ListAPIKeys, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_api_keys"))
 	app.Mutation("apiKeys.create", CreateAPIKey, gonvex.Writes("skill_api_keys"))
 	app.Mutation("apiKeys.revoke", RevokeAPIKey, gonvex.Writes("skill_api_keys"))
-	app.Query("credentials.list", ListCredentials, gonvex.Reads("skill_credentials"))
-	app.Mutation("credentials.get", GetCredential, gonvex.Reads("skill_credentials"), gonvex.Writes("skill_credentials"))
+	app.Query("credentials.list", ListCredentials, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_credentials"))
+	app.Mutation("credentials.get", GetCredential, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_credentials"), gonvex.Writes("skill_credentials"))
 	app.Mutation("credentials.save", SaveCredential, gonvex.Writes("skill_credentials"))
 	app.Mutation("credentials.delete", DeleteCredential, gonvex.Writes("skill_credentials"))
-	app.Query("agent.skills.list", AgentListSkills, gonvex.Reads("skills", "skill_api_keys"))
-	app.Query("agent.skills.get", AgentGetSkill, gonvex.Reads("skills", "skill_api_keys"))
+	app.Query("agent.skills.list", AgentListSkills, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skills", "skill_api_keys"))
+	app.Query("agent.skills.get", AgentGetSkill, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skills", "skill_api_keys"))
 	app.Mutation("agent.skills.upload", AgentUploadSkill, gonvex.Writes("skills"))
 	app.Mutation("agent.skills.delete", AgentDeleteSkill, gonvex.Writes("skills"))
-	app.Query("agent.apiKeys.list", AgentListAPIKeys, gonvex.Reads("skill_api_keys"))
-	app.Query("agent.apiKeys.verify", AgentVerifyAPIKey, gonvex.Reads("skill_api_keys"))
+	app.Query("agent.apiKeys.list", AgentListAPIKeys, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_api_keys"))
+	app.Query("agent.apiKeys.verify", AgentVerifyAPIKey, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_api_keys"))
 	// Deliberately no agent.apiKeys.create: a leaked API key must not be able
 	// to mint replacement keys that survive its own revocation. New keys come
 	// from a Google-verified session (UI or CLI browser flow) only.
 	app.Mutation("agent.apiKeys.revoke", AgentRevokeAPIKey, gonvex.Writes("skill_api_keys"))
 	app.Mutation("agent.apiKeys.revokeSelf", AgentRevokeSelf, gonvex.Writes("skill_api_keys"))
-	app.Query("agent.credentials.list", AgentListCredentials, gonvex.Reads("skill_credentials", "skill_api_keys"))
-	app.Query("agent.credentials.get", AgentGetCredential, gonvex.Reads("skill_credentials", "skill_api_keys"))
+	app.Query("agent.credentials.list", AgentListCredentials, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_credentials", "skill_api_keys"))
+	app.Query("agent.credentials.get", AgentGetCredential, gonvex.Reads("skill_access_roles", "skill_workspace_members", "skill_sessions", "skill_users", "skill_credentials", "skill_api_keys"))
 	app.Mutation("agent.credentials.save", AgentSaveCredential, gonvex.Writes("skill_credentials"))
 	app.Mutation("agent.credentials.delete", AgentDeleteCredential, gonvex.Writes("skill_credentials"))
 	registerSyncs(app)
@@ -569,6 +572,12 @@ func InviteTeamMember(ctx *gonvex.MutationCtx, args InviteMemberArgs) (TeamMembe
 	if !identity.IsWorkspaceOwner() {
 		return TeamMember{}, errors.New("only the workspace owner can invite members")
 	}
+	if args.RoleID == "" {
+		return TeamMember{}, errors.New("choose a role for this invitation")
+	}
+	if _, err := readRole(ctx.Context, ctx.DB, identity.WorkspaceID, args.RoleID); err != nil {
+		return TeamMember{}, err
+	}
 	email := strings.ToLower(strings.TrimSpace(args.Email))
 	if len(email) > 320 || !strings.Contains(email, "@") || strings.IndexFunc(email, unicode.IsSpace) >= 0 || strings.IndexFunc(email, unicode.IsControl) >= 0 || strings.Contains(email, ",") {
 		return TeamMember{}, errors.New("a valid google email is required")
@@ -601,11 +610,11 @@ func InviteTeamMember(ctx *gonvex.MutationCtx, args InviteMemberArgs) (TeamMembe
 	}
 	now := time.Now().UTC()
 	_, err = runner.ExecContext(ctx.Context, `
-		insert into skill_workspace_invitations (id, workspace_owner_id, email, invited_by, created_at)
-		values ($1, $2, $3, $4, $5)
+		insert into skill_workspace_invitations (id, workspace_owner_id, email, invited_by, created_at, role_id)
+		values ($1, $2, $3, $4, $5, $6)
 		on conflict (workspace_owner_id, email) where accepted_at is null and rejected_at is null
-		do update set invited_by = excluded.invited_by, created_at = excluded.created_at
-	`, id, identity.WorkspaceID, email, identity.OwnerID, now)
+		do update set invited_by = excluded.invited_by, created_at = excluded.created_at, role_id = excluded.role_id
+	`, id, identity.WorkspaceID, email, identity.OwnerID, now, args.RoleID)
 	if err != nil {
 		return TeamMember{}, err
 	}
@@ -683,8 +692,8 @@ func AcceptInvitation(ctx *gonvex.MutationCtx, args InvitationArgs) (TeamMember,
 		return TeamMember{}, err
 	}
 	if _, err := runner.ExecContext(ctx.Context, `
-		insert into skill_workspace_members (id, workspace_owner_id, email, invited_by, created_at)
-		select $1, workspace_owner_id, email, invited_by, now()
+		insert into skill_workspace_members (id, workspace_owner_id, email, invited_by, created_at, role_id)
+		select $1, workspace_owner_id, email, invited_by, now(), role_id
 		from skill_workspace_invitations where id = $2
 		on conflict (workspace_owner_id, email) do nothing
 	`, memberID, invitation.ID); err != nil {
@@ -812,7 +821,21 @@ func ListSkills(ctx *gonvex.QueryCtx, args SessionArgs) ([]SkillMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	return listSkills(ctx.Context, ctx.DB, ownerID, false)
+	_, role, err := callerRole(ctx.Context, ctx.DB, args.SessionToken, false)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listSkills(ctx.Context, ctx.DB, ownerID, false)
+	if err != nil {
+		return nil, err
+	}
+	visible := []SkillMeta{}
+	for _, row := range rows {
+		if role.allows("skills:read", row.ID) {
+			visible = append(visible, row)
+		}
+	}
+	return visible, nil
 }
 
 type GetSkillArgs struct {
@@ -822,6 +845,9 @@ type GetSkillArgs struct {
 }
 
 func GetSkill(ctx *gonvex.QueryCtx, args GetSkillArgs) (Skill, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "skills:read", args.ID, args.Name); err != nil {
+		return Skill{}, err
+	}
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return Skill{}, err
@@ -830,6 +856,9 @@ func GetSkill(ctx *gonvex.QueryCtx, args GetSkillArgs) (Skill, error) {
 }
 
 func SaveSkill(ctx *gonvex.MutationCtx, args SaveSkillArgs) (Skill, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "skills:write", args.ID, args.Name); err != nil {
+		return Skill{}, err
+	}
 	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return Skill{}, err
@@ -877,6 +906,9 @@ func ApproveSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (Skill, error) 
 }
 
 func DeleteSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (DeleteResult, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "skills:write", args.ID, ""); err != nil {
+		return DeleteResult{}, err
+	}
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return DeleteResult{}, err
@@ -885,11 +917,7 @@ func DeleteSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (DeleteResult, e
 }
 
 func ListAPIKeys(ctx *gonvex.QueryCtx, args SessionArgs) ([]APIKeyRecord, error) {
-	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
-	if err != nil {
-		return nil, err
-	}
-	return listAPIKeys(ctx.Context, ctx.DB, ownerID)
+	return visibleAPIKeys(ctx.Context, ctx.DB, args.SessionToken)
 }
 
 func listAPIKeys(ctx context.Context, db *sql.DB, ownerID string) ([]APIKeyRecord, error) {
@@ -931,6 +959,23 @@ func CreateAPIKey(ctx *gonvex.MutationCtx, args CreateAPIKeyArgs) (CreateAPIKeyR
 	if identity.PendingOnly {
 		return CreateAPIKeyResult{}, errors.New("accept or reject the pending workspace invitation first")
 	}
+	role, err := identityRole(ctx.Context, ctx.DB, identity)
+	if err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	scopes, err := normalizeScopes(args.Scopes)
+	if err != nil {
+		return CreateAPIKeyResult{}, err
+	}
+	if len(scopes) == 0 {
+		scopes = []string{scopeSkillsRead}
+	}
+	for _, scope := range scopes {
+		if !containsID(role.Scopes, scope) {
+			return CreateAPIKeyResult{}, errors.New("requested key permissions exceed your role")
+		}
+	}
+
 	return createAPIKey(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, identity.OwnerID, args.Name, args.Scopes, args.ExpiresInDays, args.NeverExpires)
 }
 
@@ -1002,11 +1047,22 @@ func createAPIKey(ctx context.Context, runner execQueryer, ownerID string, creat
 }
 
 func RevokeAPIKey(ctx *gonvex.MutationCtx, args RevokeAPIKeyArgs) (DeleteResult, error) {
-	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	return revokeAPIKey(ctx.Context, mutationRunner(ctx), ownerID, args.ID)
+	role, err := identityRole(ctx.Context, ctx.DB, identity)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	var creator string
+	if err := ctx.DB.QueryRowContext(ctx.Context, `select created_by from skill_api_keys where owner_id=$1 and id=$2`, identity.WorkspaceID, args.ID).Scan(&creator); err != nil {
+		return DeleteResult{}, errors.New("api key not found")
+	}
+	if creator != identity.OwnerID && !role.allows(scopeKeysRevoke, "") {
+		return DeleteResult{}, errors.New("your role does not allow revoking workspace keys")
+	}
+	return revokeAPIKey(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, args.ID)
 }
 
 func revokeAPIKey(ctx context.Context, runner execer, ownerID string, apiKeyID string) (DeleteResult, error) {
@@ -1033,10 +1089,27 @@ func ListCredentials(ctx *gonvex.QueryCtx, args SessionArgs) ([]CredentialMeta, 
 	if err != nil {
 		return nil, err
 	}
-	return listCredentialMeta(ctx.Context, ctx.DB, ownerID)
+	_, role, err := callerRole(ctx.Context, ctx.DB, args.SessionToken, false)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listCredentialMeta(ctx.Context, ctx.DB, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	visible := []CredentialMeta{}
+	for _, row := range rows {
+		if role.allows("credentials:read", row.ID) {
+			visible = append(visible, row)
+		}
+	}
+	return visible, nil
 }
 
 func GetCredential(ctx *gonvex.MutationCtx, args GetCredentialArgs) (Credential, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "credentials:read", args.ID, args.Name); err != nil {
+		return Credential{}, err
+	}
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return Credential{}, err
@@ -1049,6 +1122,9 @@ func GetCredential(ctx *gonvex.MutationCtx, args GetCredentialArgs) (Credential,
 }
 
 func SaveCredential(ctx *gonvex.MutationCtx, args SaveCredentialArgs) (CredentialMeta, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "credentials:write", args.ID, args.Name); err != nil {
+		return CredentialMeta{}, err
+	}
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return CredentialMeta{}, err
@@ -1129,6 +1205,9 @@ func saveCredential(ctx context.Context, runner execQueryer, ownerID string, cre
 }
 
 func DeleteCredential(ctx *gonvex.MutationCtx, args DeleteCredentialArgs) (DeleteResult, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "credentials:write", args.ID, ""); err != nil {
+		return DeleteResult{}, err
+	}
 	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return DeleteResult{}, err
@@ -1157,10 +1236,27 @@ func AgentListSkills(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]SkillMeta, er
 	if err != nil {
 		return nil, err
 	}
-	return listSkills(ctx.Context, ctx.DB, ownerID, true)
+	_, role, err := callerRole(ctx.Context, ctx.DB, args.APIKey, true)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listSkills(ctx.Context, ctx.DB, ownerID, true)
+	if err != nil {
+		return nil, err
+	}
+	visible := []SkillMeta{}
+	for _, row := range rows {
+		if role.allows("skills:read", row.ID) {
+			visible = append(visible, row)
+		}
+	}
+	return visible, nil
 }
 
 func AgentGetSkill(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Skill, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "skills:read", args.ID, args.Name); err != nil {
+		return Skill{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsRead)
 	if err != nil {
 		return Skill{}, err
@@ -1169,6 +1265,9 @@ func AgentGetSkill(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Skill, error) {
 }
 
 func AgentUploadSkill(ctx *gonvex.MutationCtx, args AgentSaveSkillArgs) (Skill, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "skills:write", args.ID, args.Name); err != nil {
+		return Skill{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsWrite)
 	if err != nil {
 		return Skill{}, err
@@ -1177,6 +1276,9 @@ func AgentUploadSkill(ctx *gonvex.MutationCtx, args AgentSaveSkillArgs) (Skill, 
 }
 
 func AgentDeleteSkill(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResult, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "skills:write", args.ID, ""); err != nil {
+		return DeleteResult{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsWrite)
 	if err != nil {
 		return DeleteResult{}, err
@@ -1185,6 +1287,9 @@ func AgentDeleteSkill(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResul
 }
 
 func AgentListAPIKeys(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]APIKeyRecord, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "keys:read", "", ""); err != nil {
+		return nil, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeKeysRead)
 	if err != nil {
 		return nil, err
@@ -1201,6 +1306,9 @@ func AgentVerifyAPIKey(ctx *gonvex.QueryCtx, args AgentSkillArgs) (DeleteResult,
 }
 
 func AgentRevokeAPIKey(ctx *gonvex.MutationCtx, args AgentRevokeAPIKeyArgs) (DeleteResult, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "keys:revoke", "", ""); err != nil {
+		return DeleteResult{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeKeysRevoke)
 	if err != nil {
 		return DeleteResult{}, err
@@ -1235,10 +1343,27 @@ func AgentListCredentials(ctx *gonvex.QueryCtx, args AgentSkillArgs) ([]Credenti
 	if err != nil {
 		return nil, err
 	}
-	return listCredentialMeta(ctx.Context, ctx.DB, ownerID)
+	_, role, err := callerRole(ctx.Context, ctx.DB, args.APIKey, true)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listCredentialMeta(ctx.Context, ctx.DB, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	visible := []CredentialMeta{}
+	for _, row := range rows {
+		if role.allows("credentials:read", row.ID) {
+			visible = append(visible, row)
+		}
+	}
+	return visible, nil
 }
 
 func AgentGetCredential(ctx *gonvex.QueryCtx, args AgentSkillArgs) (Credential, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "credentials:read", args.ID, args.Name); err != nil {
+		return Credential{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsRead)
 	if err != nil {
 		return Credential{}, err
@@ -1289,6 +1414,9 @@ func getCredential(ctx context.Context, db *sql.DB, ownerID string, id string, n
 }
 
 func AgentSaveCredential(ctx *gonvex.MutationCtx, args AgentSaveCredentialArgs) (CredentialMeta, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "credentials:write", args.ID, args.Name); err != nil {
+		return CredentialMeta{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsWrite)
 	if err != nil {
 		return CredentialMeta{}, err
@@ -1301,6 +1429,9 @@ func AgentSaveCredential(ctx *gonvex.MutationCtx, args AgentSaveCredentialArgs) 
 }
 
 func AgentDeleteCredential(ctx *gonvex.MutationCtx, args AgentDeleteCredentialArgs) (DeleteResult, error) {
+	if err := requireAccess(ctx.Context, ctx.DB, args.APIKey, true, "credentials:write", args.ID, ""); err != nil {
+		return DeleteResult{}, err
+	}
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeCredentialsWrite)
 	if err != nil {
 		return DeleteResult{}, err
@@ -1622,6 +1753,7 @@ func ensureTables(ctx context.Context, db execer) error {
 		ctx = context.Background()
 	}
 	statements := []string{
+		`create table if not exists skill_access_roles (id text primary key, workspace_owner_id text not null, name text not null, policy text not null)`,
 		`create table if not exists skill_users (
 			owner_id text primary key,
 			email text not null,
@@ -1689,6 +1821,14 @@ func ensureTables(ctx context.Context, db execer) error {
 			accepted_at timestamptz,
 			rejected_at timestamptz
 		)`,
+		`alter table skill_workspace_members add column if not exists role_id text not null default ''`,
+		`alter table skill_workspace_invitations add column if not exists role_id text not null default ''`,
+		`update skill_workspace_members set role_id = '' where role_id is null`,
+		`update skill_workspace_invitations set role_id = '' where role_id is null`,
+		`alter table skill_workspace_members alter column role_id set default ''`,
+		`alter table skill_workspace_invitations alter column role_id set default ''`,
+		`alter table skill_workspace_members alter column role_id set not null`,
+		`alter table skill_workspace_invitations alter column role_id set not null`,
 		`alter table skills add column if not exists owner_id text not null default ''`,
 		`alter table skill_users add column if not exists can_own boolean not null default false`,
 		`alter table skills add column if not exists content_hash text not null default ''`,
@@ -1993,6 +2133,7 @@ func claimLegacyRows(ctx context.Context, runner execer, ownerID string, email s
 		return nil
 	}
 	statements := []string{
+		`create table if not exists skill_access_roles (id text primary key, workspace_owner_id text not null, name text not null, policy text not null)`,
 		`update skills set owner_id = $1 where owner_id = ''`,
 		`update skill_api_keys set owner_id = $1, created_by = $1 where owner_id = ''`,
 		`update skill_credentials set owner_id = $1 where owner_id = ''`,

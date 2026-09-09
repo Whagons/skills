@@ -3,6 +3,13 @@ package backend
 import "github.com/gonvex/gonvex/pkg/gonvex"
 
 func Schema(s *gonvex.Schema) {
+	s.TenantTable("skill_access_roles", func(t *gonvex.Table) {
+		t.ID("id")
+		t.String("workspace_owner_id")
+		t.String("name")
+		t.String("policy")
+		t.Index("by_workspace", "workspace_owner_id")
+	})
 	s.TenantTable("skill_users", func(t *gonvex.Table) {
 		t.ID("owner_id")
 		t.String("email")
@@ -65,6 +72,7 @@ func Schema(s *gonvex.Schema) {
 		t.String("workspace_owner_id")
 		t.String("email")
 		t.String("invited_by")
+		t.String("role_id")
 		t.Time("created_at")
 		t.Time("accepted_at", gonvex.Nullable)
 		t.Time("rejected_at", gonvex.Nullable)
@@ -78,6 +86,7 @@ func Schema(s *gonvex.Schema) {
 		t.String("workspace_owner_id")
 		t.String("email")
 		t.String("invited_by")
+		t.String("role_id")
 		t.Time("created_at")
 
 		t.Index("by_workspace_email", "workspace_owner_id", "email")
