@@ -2338,3 +2338,5 @@ html[data-theme="dark"] .freshKey code {
 .settingsCard:has(.rolePicker) { overflow: visible; }
 .settingsCard:has(.rolePickerTrigger[aria-expanded="true"]) { position: relative; z-index: 60; }
 .keyRow .rolePickerOption span, .keyRow .rolePickerOption strong { white-space: normal; overflow: visible; }
+.keyRow .rolePickerTrigger > span { font: inherit; color: inherit; letter-spacing: normal; }
+.keyRow .rolePickerOption > span { font: inherit; color: inherit; letter-spacing: normal; }
