@@ -5,6 +5,7 @@ export type AccessRole = {
 };
 export type AccessState = { role: AccessRole; roles: AccessRole[]; assignments: Record<string, string> };
 export const accessAPI = {
+  snapshot: { kind: "action", path: "access.snapshot" },
   state: { kind: "query", path: "access.state" },
   vault: { kind: "query", path: "access.vault" },
   saveRole: { kind: "mutation", path: "access.saveRole" },

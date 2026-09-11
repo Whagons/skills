@@ -176,7 +176,28 @@ func requireAccess(ctx context.Context, db *sql.DB, token string, agent bool, sc
 	}
 	return nil
 }
+
+// AccessSnapshot runs as an action so permission polling never replays a
+// retained query subscription or durable query cache. Every call reauthorizes.
+func AccessSnapshot(ctx *gonvex.ActionCtx, args SessionArgs) (map[string]any, error) {
+	q := &gonvex.QueryCtx{RuntimeContext: ctx.RuntimeContext}
+	state, err := AccessStateQuery(q, args)
+	if err != nil {
+		return nil, err
+	}
+	var vault map[string]any
+	// Only owners receive the role roster. Members need a filtered vault.
+	if len(state.Roles) == 0 {
+		vault, err = AccessVault(q, args)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"state": state, "vault": vault}, nil
+}
+
 func registerAccess(app *gonvex.App) {
+	app.Action("access.snapshot", AccessSnapshot)
 	app.Query("access.state", AccessStateQuery, gonvex.Reads("skill_sessions", "skill_users", "skill_access_roles", "skill_workspace_members", "skill_workspace_invitations"))
 	app.Query("access.vault", AccessVault, gonvex.Reads("skill_sessions", "skill_users", "skill_api_keys", "skills", "skill_credentials", "skill_access_roles", "skill_workspace_members"))
 	app.Mutation("access.saveRole", SaveAccessRole, gonvex.Writes("skill_access_roles"))

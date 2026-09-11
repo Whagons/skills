@@ -80,6 +80,41 @@ func TestAccessIntegration(t *testing.T) {
 	if _, err = AssignAccessRole(m, AssignRoleArgs{SessionToken: "owner-token", ID: "membership", RoleID: role.ID}); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("fresh permission snapshot reflects assignment and role edits", func(t *testing.T) {
+		a := &gonvex.ActionCtx{RuntimeContext: q.RuntimeContext}
+		owner, err := AccessSnapshot(a, SessionArgs{SessionToken: "owner-token"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := owner["state"].(AccessState)
+		if state.Assignments["membership"] != role.ID {
+			t.Fatal("assignment missing from owner snapshot")
+		}
+		updated := role
+		updated.SkillIDs = []string{"forbidden"}
+		updated.CredentialIDs = []string{}
+		if _, err := SaveAccessRole(m, SaveRoleArgs{SessionToken: "owner-token", Role: updated}); err != nil {
+			t.Fatal(err)
+		}
+		member, err := AccessSnapshot(a, SessionArgs{SessionToken: "member-token"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		vault := member["vault"].(map[string]any)
+		skills := vault["skills"].([]map[string]any)
+		if len(skills) != 1 || skills[0]["id"] != "forbidden" || len(vault["credentials"].([]map[string]any)) != 0 {
+			t.Fatal("role edits not reflected or credentials leaked")
+		}
+		if len(member["state"].(AccessState).Roles) != 0 {
+			t.Fatal("member received owner role roster")
+		}
+		if _, err := AccessSnapshot(a, SessionArgs{SessionToken: "invalid-token"}); err == nil {
+			t.Fatal("invalid session accepted")
+		}
+		if _, err := SaveAccessRole(m, SaveRoleArgs{SessionToken: "owner-token", Role: role}); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("filtered lists and snapshot", func(t *testing.T) {
 		skills, err := ListSkills(q, SessionArgs{SessionToken: "member-token"})
 		if err != nil || len(skills) != 1 || skills[0].ID != "allowed" {

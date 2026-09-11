@@ -5,6 +5,7 @@ export const api = {
     assignRole: { kind: "mutation", path: "access.assignRole" },
     deleteRole: { kind: "mutation", path: "access.deleteRole" },
     saveRole: { kind: "mutation", path: "access.saveRole" },
+    snapshot: { kind: "action", path: "access.snapshot" },
     state: { kind: "query", path: "access.state" },
     vault: { kind: "query", path: "access.vault" },
   },

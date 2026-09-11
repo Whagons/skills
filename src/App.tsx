@@ -38,6 +38,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./com
 import { Input } from "./components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip";
 import { getAuthErrorMessage } from "./lib/auth-error";
+import { RolePicker } from "./components/RolePicker";
 import { AccessRoles } from "./components/AccessRoles";
 import { accessAPI, canAccess, resourceSummary, type AccessState } from "./lib/access";
 import { dedupeCredentials } from "./lib/credentials";
@@ -452,6 +453,7 @@ export default function App() {
   const [inviteBusy, setInviteBusy] = useState(false);
   const [accessState, setAccessState] = useState<AccessState | null>(null);
   const [accessReload, setAccessReload] = useState(0);
+  const [savingMemberID, setSavingMemberID] = useState("");
   const [accessError, setAccessError] = useState("");
   const [memberVault, setMemberVault] = useState<{ skills: SkillRow[]; credentials: CredentialRow[]; keys: APIKeyRecord[] } | null>(null);
   const [invitationReload, setInvitationReload] = useState(0);
@@ -533,8 +535,7 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
-        const state = await gonvex.query(accessAPI.state, { sessionToken }) as AccessState;
-        const vault = me?.is_owner ? null : await gonvex.query(accessAPI.vault, { sessionToken }) as NonNullable<typeof memberVault>;
+        const { state, vault } = await gonvex.action(accessAPI.snapshot, { sessionToken }) as { state: AccessState; vault: typeof memberVault };
         if (!cancelled) { setAccessState(state); setMemberVault(vault); setAccessError(""); }
       } catch (error) {
         if (!cancelled) { setAccessState(null); setMemberVault(null); setCredentialSecrets({}); setAccessError(error instanceof Error ? error.message : "Could not load permissions"); }
@@ -1675,7 +1676,7 @@ export default function App() {
             </header>
             {accessError ? <p className="memberAccessNotice" role="alert">{accessError} <Button type="button" variant="ghost" size="sm" onClick={() => setAccessReload(value => value + 1)}>Retry</Button></p> : null}
             {isWorkspaceOwner ? <AccessRoles state={accessState} skills={skills} credentials={credentials}
-              onSave={async role => { await saveRole({ sessionToken, role }); setAccessReload(value => value + 1); setNotice("Role saved. Access changes apply to members and their API keys."); }}
+              onSave={async role => { await saveRole({ sessionToken, role }); const snapshot = await gonvex.action(accessAPI.snapshot, { sessionToken }) as { state: AccessState }; setAccessState(snapshot.state); setAccessReload(value => value + 1); setNotice("Role saved. Access changes apply to members and their API keys."); }}
               onDelete={async id => { await deleteRole({ sessionToken, id }); setAccessReload(value => value + 1); setNotice("Role deleted"); }}
             /> : accessState ? <div className="memberAccessNotice"><strong>Your role: {accessState.role.name}</strong><p>{resourceSummary(accessState.role, "skills")} · {resourceSummary(accessState.role, "credentials")}</p>Contact the workspace owner to change your access.</div> : null}
             <div className="settingsLayout settingsColumns">
@@ -1731,7 +1732,7 @@ export default function App() {
                   <CardContent className="apiContent">
                     <form className="credentialForm" onSubmit={(event) => void submitInvite(event)}>
                       <label><span>Email address</span><Input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="teammate@whagons.com" type="email" required /></label>
-                      <label><span>Role</span><select value={inviteRoleID} onChange={event => setInviteRoleID(event.target.value)} required disabled={!accessState || inviteBusy}><option value="" disabled>Choose a role</option>{accessState?.roles.map(role => <option value={role.id} key={role.id}>{role.name}</option>)}</select></label>
+                      <label><span>Role</span><RolePicker label="Role" value={inviteRoleID} roles={accessState?.roles ?? []} disabled={!accessState || inviteBusy} onChange={setInviteRoleID} /></label>
                       {accessState?.roles.filter(role => role.id === inviteRoleID).map(role => <p className="selectionHint" key={role.id}>{resourceSummary(role, "skills")}<br />{resourceSummary(role, "credentials")}</p>)}
                       <Button type="submit" variant="accent" disabled={!inviteRoleID || !accessState || inviteBusy}>
                         <Plus size={16} />
@@ -1765,7 +1766,7 @@ export default function App() {
                         </div>
                         {isWorkspaceOwner ? (
                           <div className="rowActions">
-                            <select className="memberRoleSelect" aria-label={`Role for ${member.email}`} value={accessState?.assignments[member.id] ?? ""} disabled={!accessState} onChange={event => { const role_id = event.target.value; void runGuarded(async () => { await assignRole({ sessionToken, id: member.id, role_id }); setNotice(`Updated access for ${member.email}`); }); }}><option value="" disabled>Loading role…</option>{accessState?.roles.map(role => <option value={role.id} key={role.id}>{role.name}</option>)}</select>
+                            <RolePicker label={`Role for ${member.email}`} value={accessState?.assignments[member.id] ?? ""} roles={accessState?.roles ?? []} disabled={!accessState || !!savingMemberID} placeholder={accessError ? "Could not load role" : accessState ? "Choose a role" : "Loading roles…"} onChange={role_id => { setSavingMemberID(member.id); void runGuarded(async () => { try { await assignRole({ sessionToken, id: member.id, role_id }); const snapshot = await gonvex.action(accessAPI.snapshot, { sessionToken }) as { state: AccessState }; if (snapshot.state.assignments[member.id] !== role_id) throw new Error("Role assignment could not be verified. Please retry."); setAccessState(snapshot.state); setNotice(`Updated access for ${member.email}`); } finally { setSavingMemberID(""); } }); }} />
                             {member.status === "pending" ? (
                               <Button type="button" variant="outline" size="sm" onClick={() => void copyInvitation(member)}>
                                 <Clipboard size={14} /> Copy invite
