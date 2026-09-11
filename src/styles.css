@@ -2335,3 +2335,6 @@ html[data-theme="dark"] .freshKey code {
 .rolePickerOption:hover, .rolePickerOption:focus, .rolePickerOption[aria-selected="true"] { background: color-mix(in srgb, var(--acid) 12%, var(--paper-raised)); }
 .rolePickerOption strong, .rolePickerOption small { display: block; }
 .rolePickerOption small { margin-top: 5px; opacity: .65; font-size: 12px; line-height: 1.5; }
+.settingsCard:has(.rolePicker) { overflow: visible; }
+.settingsCard:has(.rolePickerTrigger[aria-expanded="true"]) { position: relative; z-index: 60; }
+.keyRow .rolePickerOption span, .keyRow .rolePickerOption strong { white-space: normal; overflow: visible; }
