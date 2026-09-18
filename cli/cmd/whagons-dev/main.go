@@ -288,7 +288,7 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 	case "get":
 		fs := flag.NewFlagSet("skills get", flag.ContinueOnError)
 		output := fs.String("output", "", "output file")
-		if err := fs.Parse(args); err != nil {
+		if err := parseInterspersed(fs, args); err != nil {
 			return err
 		}
 		if fs.NArg() < 1 {
@@ -325,7 +325,7 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 		name := fs.String("name", "", "skill name")
 		id := fs.String("id", "", "skill id")
 		summary := fs.String("summary", "", "skill summary")
-		if err := fs.Parse(args); err != nil {
+		if err := parseInterspersed(fs, args); err != nil {
 			return err
 		}
 		if fs.NArg() < 1 {
@@ -444,6 +444,44 @@ func runAPIKeys(client *Client, apiKey, command string, args []string) error {
 	}
 }
 
+// parseInterspersed parses flags that appear before or after positional
+// arguments, so "credentials set NAME --value-stdin" works the same as
+// "credentials set --value-stdin NAME". The standard flag package stops at the
+// first positional argument, which made the documented usage fail. Everything
+// after "--" is treated as positional.
+func parseInterspersed(fs *flag.FlagSet, args []string) error {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if len(arg) < 2 || arg[0] != '-' {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		name := strings.TrimLeft(arg, "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		defined := fs.Lookup(name)
+		if defined == nil {
+			// Let fs.Parse report the unknown flag.
+			continue
+		}
+		if boolFlag, ok := defined.Value.(interface{ IsBoolFlag() bool }); ok && boolFlag.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return fs.Parse(append(flags, positional...))
+}
+
 func runCredentials(client *Client, apiKey, command string, args []string) error {
 	switch command {
 	case "list":
@@ -460,7 +498,7 @@ func runCredentials(client *Client, apiKey, command string, args []string) error
 		summary := fs.String("summary", "", "credential summary")
 		valueStdin := fs.Bool("value-stdin", false, "read secret value from stdin")
 		id := fs.String("id", "", "credential id")
-		if err := fs.Parse(args); err != nil {
+		if err := parseInterspersed(fs, args); err != nil {
 			return err
 		}
 		if fs.NArg() < 1 {
