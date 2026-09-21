@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -100,5 +101,57 @@ func TestCredentialExecDefaultsToPrivateFile(t *testing.T) {
 	}
 	if options.Via != "file" {
 		t.Fatalf("delivery mode = %q, want file", options.Via)
+	}
+}
+
+func TestParseInterspersedAcceptsFlagsAfterPositionals(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"flags first", []string{"--value-stdin", "--summary", "TypeSafe key", "typesafe"}},
+		{"flags last", []string{"typesafe", "--summary", "TypeSafe key", "--value-stdin"}},
+		{"flags mixed", []string{"--summary=TypeSafe key", "typesafe", "--value-stdin"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("credentials set", flag.ContinueOnError)
+			summary := fs.String("summary", "", "")
+			valueStdin := fs.Bool("value-stdin", false, "")
+			if err := parseInterspersed(fs, tc.args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if !*valueStdin {
+				t.Fatal("expected --value-stdin to be set")
+			}
+			if *summary != "TypeSafe key" {
+				t.Fatalf("unexpected summary %q", *summary)
+			}
+			if fs.NArg() != 1 || fs.Arg(0) != "typesafe" {
+				t.Fatalf("unexpected positionals %v", fs.Args())
+			}
+		})
+	}
+}
+
+func TestParseInterspersedStopsAtDoubleDash(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	output := fs.String("output", "", "")
+	if err := parseInterspersed(fs, []string{"skill", "--", "--output", "x"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if *output != "" {
+		t.Fatalf("flag after -- should be positional, got %q", *output)
+	}
+	if got := strings.Join(fs.Args(), " "); got != "skill --output x" {
+		t.Fatalf("unexpected positionals %q", got)
+	}
+}
+
+func TestParseInterspersedReportsUnknownFlag(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{})
+	if err := parseInterspersed(fs, []string{"skill", "--bogus"}); err == nil {
+		t.Fatal("expected error for unknown flag")
 	}
 }
