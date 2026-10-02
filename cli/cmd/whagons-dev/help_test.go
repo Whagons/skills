@@ -57,7 +57,7 @@ func TestHelpRoutesBeforeAuthentication(t *testing.T) {
 		want []string
 	}{
 		{[]string{"skills"}, []string{"SKILL COMMANDS", "skills install", "skills delete"}},
-		{[]string{"skills", "help"}, []string{"SKILL COMMANDS", "skills upload"}},
+		{[]string{"skills", "help"}, []string{"SKILL COMMANDS", "skills publish"}},
 		{[]string{"skills", "--help"}, []string{"SKILL COMMANDS", "skills status"}},
 		{[]string{"help", "skills", "install"}, []string{"whagons-dev skills install", "--targets", "agents, claude"}},
 		{[]string{"skills", "help", "install"}, []string{"whagons-dev skills install", "TARGETS"}},
@@ -84,7 +84,7 @@ func TestFullReferenceListsEveryPublicCommand(t *testing.T) {
 	for _, command := range []string{
 		"setup", "update", "startup install", "daemon", "auth login", "auth set-key",
 		"auth status", "auth logout", "skills list", "skills get", "skills copy",
-		"skills upload", "skills sync", "skills install", "skills update", "skills status",
+		"skills publish", "skills sync", "skills install", "skills update", "skills status",
 		"skills install-codex", "skills update-codex", "skills delete", "api-keys list",
 		"api-keys revoke", "credentials list", "credentials set", "credentials delete",
 		"credentials exec", "version", "help",

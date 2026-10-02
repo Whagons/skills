@@ -320,8 +320,8 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 		}
 		fmt.Printf("Copied %s\n", skill.Name)
 		return nil
-	case "upload":
-		fs := flag.NewFlagSet("skills upload", flag.ContinueOnError)
+	case "publish", "upload":
+		fs := flag.NewFlagSet("skills "+command, flag.ContinueOnError)
 		name := fs.String("name", "", "skill name")
 		id := fs.String("id", "", "skill id")
 		summary := fs.String("summary", "", "skill summary")
@@ -331,11 +331,11 @@ func runSkills(client *Client, apiKey, command string, args []string) error {
 		if fs.NArg() < 1 {
 			return errors.New("missing SKILL.md file")
 		}
-		skill, err := uploadSkill(client, apiKey, fs.Arg(0), *id, *name, *summary)
+		skill, err := publishSkill(client, apiKey, fs.Arg(0), *id, *name, *summary)
 		if err != nil {
 			return err
 		}
-		reportUpload(skill)
+		reportPublish(skill)
 		return nil
 	case "sync":
 		root := "."

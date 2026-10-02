@@ -145,7 +145,9 @@ Agents do not use Google directly. They use a scoped API key created in the UI o
 
 There is deliberately no `agent.apiKeys.create`: a leaked API key cannot mint replacement keys that survive its own revocation. New keys only come from a Google-verified session (UI or CLI browser flow).
 
-Keys record their creator, scopes, and expiration. Removing a member revokes every key they created. Agent uploads are quarantined from agent reads and CLI installation until the workspace owner reviews and approves them in the UI.
+Keys record their creator, scopes, and expiration. Removing a member revokes every key they created.
+
+Workspace skills are global: every developer's agents install them. Only the workspace owner changes them. An upload with `publish: true` from a key the owner created goes live immediately, with no UI approval. Members can only propose new skills; proposals stay out of agent reads until the owner publishes them, and members cannot change or delete a published skill from the CLI or the UI. Older CLIs, which omit `publish`, still create pending uploads.
 
 A session or API key can only read and mutate rows in its own workspace. Credential values are only returned through `agent.credentials.get` / `credentials.get` — never in lists. Do not print credential values in logs or chat.
 
@@ -198,7 +200,7 @@ whagons-dev auth logout
 whagons-dev skills list
 whagons-dev skills get whagons-monitor --output ./SKILL.md
 whagons-dev skills copy whagons-monitor
-whagons-dev skills upload ./my-skill/SKILL.md
+whagons-dev skills publish ./my-skill/SKILL.md   # live for every developer within seconds
 whagons-dev skills sync ./skills
 whagons-dev skills install [--targets all|codex,t3,claude,cursor,opencode]
 whagons-dev skills update
