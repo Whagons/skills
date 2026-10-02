@@ -1113,7 +1113,7 @@ func writeRegularFile(path string, data []byte, mode os.FileMode) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".skill-*")
+	temp, err := os.CreateTemp(filepath.Dir(path), writeTempPrefix+"*")
 	if err != nil {
 		return err
 	}
@@ -1130,7 +1130,27 @@ func writeRegularFile(path string, data []byte, mode os.FileMode) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, path)
+	return replaceFile(tempPath, path)
+}
+
+const writeTempPrefix = ".skill-"
+
+// replaceWait bounds how long a replace waits for readers on Windows.
+var replaceWait = 5 * time.Second
+
+// replaceFile renames source over destination. Windows refuses to replace a
+// file another process holds open without FILE_SHARE_DELETE, which is how
+// most agents read SKILL.md, so the daemon retries until the reader closes it
+// instead of failing the sync.
+func replaceFile(source, destination string) error {
+	deadline := time.Now().Add(replaceWait)
+	for {
+		err := os.Rename(source, destination)
+		if err == nil || runtime.GOOS != "windows" || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func uploadSkill(client *Client, apiKey, path, id, name, summary string) (Skill, error) {

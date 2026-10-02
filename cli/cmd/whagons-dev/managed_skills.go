@@ -131,11 +131,12 @@ func writeManagedSkill(dir string, skill Skill, key []byte) error {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("refusing non-directory managed skill path: %s", dir)
 		}
+		removeStaleWriteTemps(dir)
 		marker, valid, markerErr := readManagedMarker(dir, key)
 		if markerErr != nil || !marker.owned(key) {
 			return fmt.Errorf("refusing to overwrite unowned or locally modified skill directory: %s", dir)
 		}
-		if !valid {
+		if !valid && !interruptedUpdateOf(dir, skill) {
 			return fmt.Errorf("%w: %s", errLocallyModifiedSkill, dir)
 		}
 		if !managedDirectoryHasOnlyOwnedFiles(dir) {
@@ -159,6 +160,38 @@ func writeManagedSkill(dir string, skill Skill, key []byte) error {
 	return writeRegularFile(filepath.Join(dir, managedMarkerName), markerBytes, 0o600)
 }
 
+// A sync writes SKILL.md and then the marker, each by atomic rename. If it
+// stops between the two, SKILL.md already holds the vault content while the
+// marker still signs the previous version. That is our own unfinished update,
+// not a local edit, so finishing it must not preserve the skill forever.
+func interruptedUpdateOf(dir string, skill Skill) bool {
+	content, err := readRegularFile(filepath.Join(dir, "SKILL.md"), maxSkillBytes)
+	return err == nil && string(content) == skill.Content
+}
+
+// staleWriteTempAge keeps a concurrent writer's in-flight temp file alive.
+const staleWriteTempAge = 2 * time.Minute
+
+// removeStaleWriteTemps deletes temp files that writeRegularFile leaves behind
+// when the process is killed mid-write. Left alone they make the directory
+// look locally modified, and the skill stops updating.
+func removeStaleWriteTemps(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), writeTempPrefix) || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < staleWriteTempAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
 func pruneManagedSkills(root string, active map[string]bool, key []byte) (PruneResult, error) {
 	var result PruneResult
 	entries, err := os.ReadDir(root)
@@ -173,6 +206,7 @@ func pruneManagedSkills(root string, active map[string]bool, key []byte) (PruneR
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
+		removeStaleWriteTemps(dir)
 		_, valid, markerErr := readManagedMarker(dir, key)
 		if markerErr != nil {
 			if _, statErr := os.Stat(filepath.Join(dir, managedMarkerName)); statErr == nil {
@@ -195,54 +229,74 @@ func pruneManagedSkills(root string, active map[string]bool, key []byte) (PruneR
 }
 
 func sameResolvedPath(path, want string) bool {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false
-	}
-	resolvedAbs, err := filepath.Abs(resolved)
-	if err != nil {
-		return false
+	resolved, ok := managedLinkTarget(path)
+	if !ok {
+		evaluated, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return false
+		}
+		if resolved, err = filepath.Abs(evaluated); err != nil {
+			return false
+		}
 	}
 	wantAbs, err := filepath.Abs(want)
 	if err != nil {
 		return false
 	}
-	return filepath.Clean(resolvedAbs) == filepath.Clean(wantAbs)
+	return samePath(resolved, wantAbs)
+}
+
+func samePath(left, right string) bool {
+	left, right = filepath.Clean(left), filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+// isDirectoryLink reports a symlink, or on Windows a directory junction.
+// Since Go 1.23, Lstat reports junctions as ModeIrregular rather than
+// ModeSymlink and filepath.EvalSymlinks no longer follows them, so junctions
+// must be read with os.Readlink.
+func isDirectoryLink(mode os.FileMode) bool {
+	if mode&os.ModeSymlink != 0 {
+		return true
+	}
+	return runtime.GOOS == "windows" && mode&os.ModeIrregular != 0
 }
 
 func managedLinkTarget(path string) (string, bool) {
 	info, err := os.Lstat(path)
+	if err != nil || !isDirectoryLink(info.Mode()) {
+		return "", false
+	}
+	target, err := os.Readlink(path)
 	if err != nil {
 		return "", false
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(path)
-		if err != nil {
-			return "", false
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(path), target)
-		}
-		absolute, err := filepath.Abs(target)
-		return absolute, err == nil
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
 	}
-	if runtime.GOOS == "windows" {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return "", false
-		}
-		absolute, err := filepath.Abs(resolved)
-		return absolute, err == nil
-	}
-	return "", false
+	absolute, err := filepath.Abs(target)
+	return absolute, err == nil
 }
 
+// symlink is replaceable in tests to exercise the Windows junction fallback.
+var symlink = os.Symlink
+
 func createDirectoryLink(source, destination string) error {
-	if err := os.Symlink(source, destination); err == nil {
+	// Junctions require absolute targets; a relative SKILLS_DIR would
+	// otherwise produce a link that resolves against the wrong directory.
+	source, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	if err := symlink(source, destination); err == nil {
 		return nil
 	} else if runtime.GOOS != "windows" {
 		return err
 	}
+	// Symlinks need Developer Mode or elevation on Windows; junctions do not.
 	output, err := exec.Command("cmd", "/c", "mklink", "/J", destination, source).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create directory junction: %w (%s)", err, strings.TrimSpace(string(output)))
@@ -296,7 +350,7 @@ func installIntegrationLinks(store, target string, active map[string]bool) (Link
 		if !managedLink {
 			continue
 		}
-		if filepath.Dir(filepath.Clean(resolvedAbs)) != filepath.Clean(storeAbs) {
+		if !samePath(filepath.Dir(resolvedAbs), storeAbs) {
 			continue
 		}
 		if err := os.Remove(path); err != nil {
