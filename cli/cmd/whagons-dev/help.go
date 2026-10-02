@@ -87,7 +87,7 @@ Quick start
 
 SKILLS & AGENTS
   setup          Configure this computer
-  skills         List, upload, install, and update skills
+  skills         List, publish, install, and update skills
   startup        Manage background skill synchronization
   daemon         Run synchronization directly
 
@@ -122,7 +122,7 @@ const skillsHelp = `SKILL COMMANDS
   whagons-dev skills list
   whagons-dev skills get <name-or-id> [--output FILE]
   whagons-dev skills copy <name-or-id>
-  whagons-dev skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
+  whagons-dev skills publish <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
   whagons-dev skills sync [DIR]
   whagons-dev skills install [--targets all|LIST]
   whagons-dev skills update
@@ -133,7 +133,12 @@ Compatibility
   whagons-dev skills install-codex [--dir DIR]
   whagons-dev skills update-codex [--dir DIR]
 
-Uploads require owner approval. Only approved skills are installed.
+Publishing replaces the skill for every developer within seconds. A gate
+runs first: it diffs against the published version, rejects filler and
+repeated lines, and has Claude Code or Codex (or WHAGONS_DEV_REVIEW_COMMAND)
+block slop and contradictions with other skills and AGENTS.md/CLAUDE.md.
+Only the workspace owner's key publishes; other keys submit pending
+proposals and cannot change published skills. "upload" is an alias.
 `
 
 const authHelp = `AUTH COMMANDS
@@ -200,7 +205,7 @@ const fullReference = `ALL COMMANDS
   whagons-dev skills list
   whagons-dev skills get <name-or-id> [--output FILE]
   whagons-dev skills copy <name-or-id>
-  whagons-dev skills upload <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
+  whagons-dev skills publish <SKILL.md> [--name NAME] [--id ID] [--summary TEXT]
   whagons-dev skills sync [DIR]
   whagons-dev skills install [--targets all|LIST]
   whagons-dev skills update
@@ -302,7 +307,7 @@ directories. Signed, unchanged managed skills are pruned after vault deletion.
 }
 
 func init() {
-	for _, command := range []string{"list", "get", "copy", "upload", "sync", "update", "status", "install-codex", "update-codex", "delete"} {
+	for _, command := range []string{"list", "get", "copy", "publish", "sync", "update", "status", "install-codex", "update-codex", "delete"} {
 		helpPages["skills "+command] = skillsHelp
 	}
 	for _, command := range []string{"login", "set-key", "status", "logout"} {

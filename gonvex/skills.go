@@ -145,6 +145,10 @@ type AgentSaveSkillArgs struct {
 	Name    string `json:"name"`
 	Summary string `json:"summary"`
 	Content string `json:"content"`
+	// Publish asks for an owner upload to go live immediately. whagons-dev
+	// sets it only after its publish gate passes; older CLIs omit it and their
+	// uploads stay pending as before.
+	Publish bool `json:"publish"`
 }
 
 type AgentRevokeAPIKeyArgs struct {
@@ -866,8 +870,54 @@ func SaveSkill(ctx *gonvex.MutationCtx, args SaveSkillArgs) (Skill, error) {
 	if identity.PendingOnly {
 		return Skill{}, errors.New("accept or reject the pending workspace invitation first")
 	}
-	runner := mutationRunner(ctx)
-	return saveSkill(ctx.Context, runner, identity.WorkspaceID, args.ID, args.Name, args.Summary, args.Content, true, identity.OwnerID)
+	return writeWorkspaceSkill(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, identity.OwnerID, identity.IsWorkspaceOwner(), true, args.ID, args.Name, args.Summary, args.Content)
+}
+
+var errOwnerOnlySkillChange = errors.New("only the workspace owner can change or delete a published skill; propose a new skill instead")
+
+// writeWorkspaceSkill is the single rule for writing workspace (global)
+// skills, which every developer's agents install. The owner publishes:
+// publish=true makes the row live immediately. Anyone else may only propose a
+// skill whose identity has no approved row yet; it stays pending until the
+// owner publishes it, and published skills cannot be overwritten or taken
+// offline. A per-user skill scope, if added later, belongs here.
+func writeWorkspaceSkill(ctx context.Context, runner execQueryer, workspaceID string, actorID string, owner bool, publish bool, id string, name string, summary string, content string) (Skill, error) {
+	if !owner {
+		published, err := publishedSkillExists(ctx, runner, workspaceID, id, name)
+		if err != nil {
+			return Skill{}, err
+		}
+		if published {
+			return Skill{}, errOwnerOnlySkillChange
+		}
+		return saveSkill(ctx, runner, workspaceID, id, name, summary, content, false, "")
+	}
+	approvedBy := ""
+	if publish {
+		approvedBy = actorID
+	}
+	return saveSkill(ctx, runner, workspaceID, id, name, summary, content, publish, approvedBy)
+}
+
+func publishedSkillExists(ctx context.Context, runner execQueryer, workspaceID string, id string, name string) (bool, error) {
+	if err := ensureTables(ctx, runner); err != nil {
+		return false, err
+	}
+	existing := existingSkillID(ctx, runner, workspaceID, strings.TrimSpace(id), strings.TrimSpace(name))
+	var published bool
+	err := runner.QueryRowContext(ctx, `select exists(select 1 from skills where owner_id = $1 and id = $2 and approved_at is not null)`, workspaceID, existing).Scan(&published)
+	return published, err
+}
+
+// apiKeyIsWorkspaceOwner reports whether the key was created by the
+// workspace owner themselves, as opposed to a member's key in that workspace.
+func apiKeyIsWorkspaceOwner(ctx context.Context, db queryer, apiKey string, workspaceID string) (bool, error) {
+	var createdBy string
+	err := db.QueryRowContext(ctx, `select created_by from skill_api_keys where key_hash = $1`, hashToken(strings.TrimSpace(apiKey))).Scan(&createdBy)
+	if err != nil {
+		return false, err
+	}
+	return createdBy != "" && createdBy == workspaceID, nil
 }
 
 func ApproveSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (Skill, error) {
@@ -909,11 +959,14 @@ func DeleteSkill(ctx *gonvex.MutationCtx, args DeleteSkillArgs) (DeleteResult, e
 	if err := requireAccess(ctx.Context, ctx.DB, args.SessionToken, false, "skills:write", args.ID, ""); err != nil {
 		return DeleteResult{}, err
 	}
-	ownerID, err := verifySession(ctx.Context, ctx.DB, args.SessionToken)
+	identity, err := verifySessionIdentity(ctx.Context, ctx.DB, args.SessionToken)
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	return deleteSkill(ctx.Context, mutationRunner(ctx), ownerID, args.ID)
+	if !identity.IsWorkspaceOwner() {
+		return DeleteResult{}, errOwnerOnlySkillChange
+	}
+	return deleteSkill(ctx.Context, mutationRunner(ctx), identity.WorkspaceID, args.ID)
 }
 
 func ListAPIKeys(ctx *gonvex.QueryCtx, args SessionArgs) ([]APIKeyRecord, error) {
@@ -1272,7 +1325,11 @@ func AgentUploadSkill(ctx *gonvex.MutationCtx, args AgentSaveSkillArgs) (Skill, 
 	if err != nil {
 		return Skill{}, err
 	}
-	return saveSkill(ctx.Context, mutationRunner(ctx), ownerID, args.ID, args.Name, args.Summary, args.Content, false, "")
+	owner, err := apiKeyIsWorkspaceOwner(ctx.Context, ctx.DB, args.APIKey, ownerID)
+	if err != nil {
+		return Skill{}, err
+	}
+	return writeWorkspaceSkill(ctx.Context, mutationRunner(ctx), ownerID, ownerID, owner, args.Publish, args.ID, args.Name, args.Summary, args.Content)
 }
 
 func AgentDeleteSkill(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResult, error) {
@@ -1282,6 +1339,13 @@ func AgentDeleteSkill(ctx *gonvex.MutationCtx, args AgentSkillArgs) (DeleteResul
 	ownerID, err := verifyAPIKey(ctx.Context, ctx.DB, args.APIKey, scopeSkillsWrite)
 	if err != nil {
 		return DeleteResult{}, err
+	}
+	owner, err := apiKeyIsWorkspaceOwner(ctx.Context, ctx.DB, args.APIKey, ownerID)
+	if err != nil {
+		return DeleteResult{}, err
+	}
+	if !owner {
+		return DeleteResult{}, errOwnerOnlySkillChange
 	}
 	return deleteSkill(ctx.Context, mutationRunner(ctx), ownerID, args.ID)
 }

@@ -18,8 +18,33 @@ import (
 // fakeVault speaks the slice of the Gonvex WebSocket protocol the CLI uses:
 // auth, agent.skills.list and agent.skills.get.
 type fakeVault struct {
-	mu     sync.Mutex
-	skills map[string]Skill
+	mu      sync.Mutex
+	skills  map[string]Skill
+	uploads int
+}
+
+// mutate mirrors the vault's publish rule: "owner-key" publishes live,
+// any other key may not change a published skill and only proposes.
+func (v *fakeVault) mutate(path string, args map[string]any) (any, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if path != "agent.skills.upload" {
+		return nil, errors.New("unknown function " + path)
+	}
+	v.uploads++
+	name, _ := args["name"].(string)
+	owner := args["apiKey"] == "owner-key"
+	publish, _ := args["publish"].(bool)
+	for _, existing := range v.skills {
+		if strings.EqualFold(existing.Name, name) && existing.Approved && !owner {
+			return nil, errors.New("only the workspace owner can change or delete a published skill; propose a new skill instead")
+		}
+	}
+	id, _ := args["id"].(string)
+	content, _ := args["content"].(string)
+	skill := Skill{ID: id, Name: name, Content: content, UpdatedAt: time.Now().Format(time.RFC3339Nano), Approved: owner && publish}
+	v.skills[id] = skill
+	return skill, nil
 }
 
 func (v *fakeVault) put(skill Skill) {
@@ -53,6 +78,14 @@ func (v *fakeVault) serve(t *testing.T) string {
 			switch msg["type"] {
 			case "auth":
 				_ = conn.WriteJSON(map[string]any{"type": "auth.result", "id": id})
+			case "mutation.call":
+				args, _ := msg["args"].(map[string]any)
+				result, mutationErr := v.mutate(msg["path"].(string), args)
+				if mutationErr != nil {
+					_ = conn.WriteJSON(map[string]any{"type": "mutation.error", "id": id, "error": mutationErr.Error()})
+					continue
+				}
+				_ = conn.WriteJSON(map[string]any{"type": "mutation.result", "id": id, "result": result})
 			case "query.subscribe":
 				args, _ := msg["args"].(map[string]any)
 				result, queryErr := v.query(msg["path"].(string), args)
@@ -75,13 +108,16 @@ func (v *fakeVault) query(path string, args map[string]any) (any, error) {
 	case "agent.skills.list":
 		list := []Skill{}
 		for _, skill := range v.skills {
+			if !skill.Approved {
+				continue
+			}
 			meta := skill
 			meta.Content = ""
 			list = append(list, meta)
 		}
 		return list, nil
 	case "agent.skills.get":
-		if skill, ok := v.skills[args["id"].(string)]; ok {
+		if skill, ok := v.skills[args["id"].(string)]; ok && skill.Approved {
 			return skill, nil
 		}
 		return nil, errors.New("skill not found")

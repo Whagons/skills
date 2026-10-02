@@ -173,8 +173,9 @@ func TestAccessIntegration(t *testing.T) {
 		if err != nil || credential.ID != "secret-allowed" || credential.Value != "test-secret" {
 			t.Fatal("allowed credential unavailable", err)
 		}
-		if _, err := SaveSkill(m, SaveSkillArgs{SessionToken: "member-token", ID: "allowed", Name: "allowed-skill", Content: "updated allowed content"}); err != nil {
-			t.Fatal(err)
+		// Published workspace skills belong to the owner; see publish_test.go.
+		if _, err := SaveSkill(m, SaveSkillArgs{SessionToken: "member-token", ID: "allowed", Name: "allowed-skill", Content: "updated allowed content"}); err == nil {
+			t.Fatal("member changed a published workspace skill")
 		}
 		keys, err := ListAPIKeys(q, SessionArgs{SessionToken: "member-token"})
 		if err != nil || len(keys) != 1 || !keys[0].CanRevoke {
