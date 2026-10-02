@@ -120,12 +120,24 @@ WantedBy=default.target
 			return fmt.Errorf("load LaunchAgent: %w (%s)", err, strings.TrimSpace(string(output)))
 		}
 	case "windows":
-		command := fmt.Sprintf("\"%s\" daemon", executable)
-		output, err := exec.Command("schtasks", "/Create", "/TN", definition, "/TR", command, "/SC", "ONLOGON", "/F").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("create scheduled task: %w (%s)", err, strings.TrimSpace(string(output)))
+		commands := windowsStartupCommands(executable)
+		taskOutput, taskErr := exec.Command(commands.createTask[0], commands.createTask[1:]...).CombinedOutput()
+		if taskErr == nil {
+			_ = exec.Command(commands.runTask[0], commands.runTask[1:]...).Run()
+			break
 		}
-		_ = exec.Command("schtasks", "/Run", "/TN", definition).Run()
+		// Logon-triggered tasks can require elevation. The per-user Run key
+		// never does, so a standard account still gets background sync.
+		runOutput, runErr := exec.Command(commands.addRunKey[0], commands.addRunKey[1:]...).CombinedOutput()
+		if runErr != nil {
+			return fmt.Errorf("create scheduled task: %w (%s); add logon Run entry: %v (%s)", taskErr, strings.TrimSpace(string(taskOutput)), runErr, strings.TrimSpace(string(runOutput)))
+		}
+		daemon := exec.Command(executable, "daemon")
+		detachDaemon(daemon)
+		if err := daemon.Start(); err != nil {
+			return fmt.Errorf("start background sync: %w", err)
+		}
+		_ = daemon.Process.Release()
 	}
 	fmt.Println("✓ Background skill sync installed and started")
 	return nil
@@ -137,10 +149,14 @@ func startupStatus() (string, error) {
 		return "", err
 	}
 	if runtime.GOOS == "windows" {
-		if err := exec.Command("schtasks", "/Query", "/TN", definition).Run(); err != nil {
-			return "not installed", nil
+		commands := windowsStartupCommands("")
+		if exec.Command("schtasks", "/Query", "/TN", definition).Run() == nil {
+			return "installed (scheduled task)", nil
 		}
-		return "installed", nil
+		if exec.Command(commands.queryRunKey[0], commands.queryRunKey[1:]...).Run() == nil {
+			return "installed (logon Run entry)", nil
+		}
+		return "not installed", nil
 	}
 	if _, err := os.Stat(definition); os.IsNotExist(err) {
 		return "not installed", nil
@@ -172,7 +188,29 @@ func removeStartupService() error {
 		if err != nil && !strings.Contains(strings.ToLower(string(output)), "cannot find") {
 			return fmt.Errorf("delete scheduled task: %w (%s)", err, strings.TrimSpace(string(output)))
 		}
+		commands := windowsStartupCommands("")
+		_ = exec.Command(commands.deleteRunKey[0], commands.deleteRunKey[1:]...).Run()
 	}
 	fmt.Println("✓ Background skill sync removed")
 	return nil
+}
+
+const windowsRunKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+
+type windowsStartup struct {
+	createTask, runTask, addRunKey, queryRunKey, deleteRunKey []string
+}
+
+// windowsStartupCommands builds the schtasks and reg invocations. The daemon
+// command line quotes the executable because user profiles often contain
+// spaces (C:\Users\Jane Doe\go\bin\whagons-dev.exe).
+func windowsStartupCommands(executable string) windowsStartup {
+	daemon := fmt.Sprintf("\"%s\" daemon", executable)
+	return windowsStartup{
+		createTask:   []string{"schtasks", "/Create", "/TN", "WhagonsDev", "/TR", daemon, "/SC", "ONLOGON", "/F"},
+		runTask:      []string{"schtasks", "/Run", "/TN", "WhagonsDev"},
+		addRunKey:    []string{"reg", "add", windowsRunKey, "/v", "WhagonsDev", "/t", "REG_SZ", "/d", daemon, "/f"},
+		queryRunKey:  []string{"reg", "query", windowsRunKey, "/v", "WhagonsDev"},
+		deleteRunKey: []string{"reg", "delete", windowsRunKey, "/v", "WhagonsDev", "/f"},
+	}
 }
