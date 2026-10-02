@@ -128,3 +128,20 @@ test("sync projections never include secret-bearing columns", async () => {
   assert.match(syncs, /EqualArg\("owner_id", "ownerId"\)/);
   assert.match(syncs, /identity\.WorkspaceID/);
 });
+
+test("every live query declares every column of the tables it reads as a filter", async () => {
+  // The runtime skips rerunning a subscription for an update to a row outside
+  // its last result unless a declared filter column changed. Approvals,
+  // revocations and role edits update exactly such rows.
+  const manifest = JSON.parse(await source("gonvex/_generated/manifest.json"));
+  const tables = manifest.schema.tenantTables as Record<string, { columns: Record<string, unknown> }>;
+  const queries = Object.entries(manifest.functions as Record<string, any>).filter(([, fn]) => fn.kind === "query");
+  assert.ok(queries.length > 0);
+  for (const [path, fn] of queries) {
+    for (const read of fn.dependencies?.reads ?? []) {
+      const columns = Object.keys(tables[read.table]?.columns ?? {});
+      const missing = columns.filter((column) => !(read.filters ?? []).includes(column));
+      assert.deepEqual(missing, [], `${path} reads ${read.table} without filters ${missing.join(", ")}`);
+    }
+  }
+});
