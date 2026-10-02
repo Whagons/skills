@@ -198,8 +198,8 @@ func AccessSnapshot(ctx *gonvex.ActionCtx, args SessionArgs) (map[string]any, er
 
 func registerAccess(app *gonvex.App) {
 	app.Action("access.snapshot", AccessSnapshot)
-	app.Query("access.state", AccessStateQuery, gonvex.Reads("skill_sessions", "skill_users", "skill_access_roles", "skill_workspace_members", "skill_workspace_invitations"))
-	app.Query("access.vault", AccessVault, gonvex.Reads("skill_sessions", "skill_users", "skill_api_keys", "skills", "skill_credentials", "skill_access_roles", "skill_workspace_members"))
+	app.Query("access.state", AccessStateQuery, gonvex.Reads("skill_sessions", "skill_users", "skill_access_roles", "skill_workspace_members", "skill_workspace_invitations").Filters("accepted_at", "approved_at", "approved_by", "can_own", "content", "content_hash", "created_at", "created_by", "email", "expires_at", "id", "invited_by", "key_hash", "name", "owner_id", "pending_only", "policy", "prefix", "rejected_at", "revoked_at", "role_id", "scopes", "secret_value", "summary", "token_hash", "updated_at", "workspace_id", "workspace_owner_id"))
+	app.Query("access.vault", AccessVault, gonvex.Reads("skill_sessions", "skill_users", "skill_api_keys", "skills", "skill_credentials", "skill_access_roles", "skill_workspace_members").Filters("accepted_at", "approved_at", "approved_by", "can_own", "content", "content_hash", "created_at", "created_by", "email", "expires_at", "id", "invited_by", "key_hash", "name", "owner_id", "pending_only", "policy", "prefix", "rejected_at", "revoked_at", "role_id", "scopes", "secret_value", "summary", "token_hash", "updated_at", "workspace_id", "workspace_owner_id"))
 	app.Mutation("access.saveRole", SaveAccessRole, gonvex.Writes("skill_access_roles"))
 	app.Mutation("access.deleteRole", DeleteAccessRole, gonvex.Writes("skill_access_roles"))
 	app.Mutation("access.assignRole", AssignAccessRole, gonvex.Writes("skill_workspace_members", "skill_workspace_invitations"))
