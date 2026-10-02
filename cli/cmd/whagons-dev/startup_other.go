@@ -2,6 +2,13 @@
 
 package main
 
-import "os/exec"
+import (
+	"context"
+	"os/exec"
+)
 
 func detachDaemon(*exec.Cmd) {}
+
+func shellCommand(ctx context.Context, command string) *exec.Cmd {
+	return exec.CommandContext(ctx, "sh", "-c", command)
+}

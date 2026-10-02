@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -269,10 +268,7 @@ func repoInstructions(start string) map[string]string {
 // WHAGONS_DEV_REVIEW_COMMAND runs through the shell with the prompt on stdin.
 func reviewerCommand(ctx context.Context) (*exec.Cmd, error) {
 	if command := envValue("REVIEW_COMMAND"); command != "" {
-		if runtime.GOOS == "windows" {
-			return exec.CommandContext(ctx, "cmd", "/C", command), nil
-		}
-		return exec.CommandContext(ctx, "sh", "-c", command), nil
+		return shellCommand(ctx, command), nil
 	}
 	if path, err := exec.LookPath("claude"); err == nil {
 		return exec.CommandContext(ctx, path, "-p", "--output-format", "text"), nil
