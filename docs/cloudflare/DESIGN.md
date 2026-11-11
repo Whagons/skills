@@ -86,7 +86,7 @@ Agent (API key) functions, used by `whagons-dev` and scripts:
 
 | Path | Kind | Scope | Notes |
 | --- | --- | --- | --- |
-| `agent.skills.list` | query (live) | `skills:read` | Published only, metadata only. The CLI daemon keeps this subscribed and expects a fresh `query.result` whenever skills change. |
+| `agent.skills.list` | query (live) | `skills:read` | Published only, metadata only. Today the CLI daemon keeps this subscribed for pushed updates; on Workers the daemon polls it (§4.2). |
 | `agent.skills.get` | query | `skills:read` | By `id` or `name`; published only. |
 | `agent.skills.upload` | mutation | `skills:write` | `publish: true` from an **owner-created** key goes live; others create pending proposals. |
 | `agent.skills.delete` | mutation | `skills:write` | Owner-created key only. |
@@ -129,26 +129,30 @@ The browser CLI-authorization flow (loopback callback, state-bound POST, key
 never in a URL) is entirely frontend + `apiKeys.create`, and carries over
 unchanged.
 
+**Decision (Gabriel): no backwards compatibility.** Nobody depends on old CLI
+versions, so the Worker does not speak this WebSocket protocol. The CLI in
+this repository is updated to the HTTP API (§4.2) and reaches developers
+through its existing self-update.
+
 ## 3. Target architecture
 
 ```
                      skills.whagons.com (Worker custom domain)
                                     │
                       ┌─────────────▼──────────────┐
-                      │ Worker  skills-vault       │  security headers, routing
-                      │  /            static assets (React build)
-                      │  /ws          WebSocket  ──┐
-                      │  /api/<path>  JSON RPC   ──┤
-                      │  /admin/*     operator   ──┤  (bearer ADMIN_TOKEN, off by default)
-                      │  /health                   │
-                      └────────────────────────────┤
-                                                   ▼
+                      │ Worker  skills-vault       │  security headers, routing,
+                      │  /            static UI    │  per-IP rate limits
+                      │  /api/<fn>    JSON API ──┐ │
+                      │  /admin/*     operator ──┤ │  (bearer ADMIN_TOKEN, off by default)
+                      │  /health                 │ │
+                      └──────────────────────────┼─┘
+                                                 ▼  RPC
                       ┌────────────────────────────────────────────┐
-                      │ Durable Object  Vault  (idFromName "vault") │
+                      │ Durable Object  Vault  (idFromName "vault", │
+                      │                 locationHint "enam")        │
                       │  SQLite: users, sessions, skills, keys,    │
                       │          credentials, team, roles, audit   │
-                      │  hibernatable WebSockets + live queries    │
-                      │  alarm: pruning                            │
+                      │  serialized calls · alarm: pruning         │
                       └───────────────┬────────────────────────────┘
                                       │ overflow skill content (> 1 MiB), nightly backups
                                       ▼
@@ -157,23 +161,22 @@ unchanged.
 
 ### 3.1 Why one SQLite Durable Object (and not D1)
 
-* **Live queries need a stateful coordinator.** The CLI daemon and the UI rely
-  on pushed `query.result` updates. A Durable Object owns the WebSockets
-  (with the hibernation API, so idle sockets cost nothing) and sees every
-  write, so it can re-run subscribed queries after each commit. D1 would still
-  need a Durable Object for this.
 * **Transactions and invariants.** Every rule in §2.2 (limits, unique names,
   "removal revokes keys", role checks) is a read-then-write. A single DO runs
   them serially against local SQLite, with no cross-request races and no
-  network round trips per statement.
+  network round trips per statement. D1 would need the same rules re-expressed
+  as single SQL statements or batches.
 * **Scale fits easily.** About 9 MB of data and a team-sized request rate. One
   DO's SQLite holds 10 GB.
 * **Point-in-time recovery.** SQLite-backed DOs keep 30 days of PITR
   bookmarks, in addition to the nightly R2 export (§7).
 
-Trade-off: one DO lives in one Cloudflare location, chosen near its first
-request (or by `locationHint`). Agents elsewhere pay one extra round trip. For
-a vault that is read a few times per command, that is acceptable.
+**Location (decision): `enam`, eastern North America.** The Worker asks for
+the DO with `locationHint: "enam"` (variable `VAULT_LOCATION_HINT`). A hint
+only applies when the object is first created, so it must be set before the
+first production request. It is in `wrangler.jsonc` for both environments.
+Agents far from eastern North America pay one extra round trip per call,
+which is acceptable for a vault read a few times per command.
 
 ### 3.2 R2
 
@@ -192,58 +195,64 @@ The vault has no blob features today, so R2 has two narrow uses:
 The same React build is served from Workers static assets with SPA fallback.
 The Worker runs first for every request so it can add the security headers
 that `nginx.conf` sets today: CSP, HSTS, `Referrer-Policy`, `nosniff`,
-`X-Frame-Options`, `Permissions-Policy` and COOP. CSP `connect-src` names the
-Worker's own `wss://` origin instead of `wss://gonvex.whagons.com`.
+`X-Frame-Options`, `Permissions-Policy` and COOP. CSP `connect-src` is
+`'self'` (plus the CLI loopback callback and Cloudflare analytics), because the
+UI talks only to its own origin.
 
 The frontend's data layer is selected at build time by a Vite alias,
 `@backend`. The default build, used by Docker/Coolify, resolves it to
-`src/backend/gonvex.tsx`, so merging this work does not change production.
-`vite build --mode cloudflare` resolves it to `src/backend/cloudflare.tsx`,
-a ~150-line client: one-shot calls go to the JSON API (§4.2), and owner
-collections are live queries over the WebSocket. `App.tsx` keeps the same
-`useSync` / `useMutation` / `query` calls.
+`src/backend/gonvex.tsx`, so merging this work does not change the production
+UI. `vite build --mode cloudflare` resolves it to `src/backend/cloudflare.tsx`,
+a small client for the JSON API. Owner collections (`skills.sync` and the
+others) are polled every 5 seconds while the tab is visible (every 30 seconds
+while hidden), and immediately after the browser's own writes. Members
+already poll `access.snapshot` every 5 seconds. Nothing about the vault is
+persisted in the browser. `App.tsx` keeps the same `useSync` / `useMutation` /
+`query` calls.
 
 ## 4. API on Workers
 
-### 4.1 WebSocket: Gonvex-compatible subset (no client change needed)
+### 4.1 One HTTP API
 
-`GET /ws` (with or without `?project=…`) accepts the exact message subset in
-§2.3, with the same paths, arguments, result shapes and error strings:
+The full reference is [`API.md`](API.md). In short:
 
-* `auth` → `auth.result`. The token is accepted and ignored, as it carries no
-  authority today. A `tenant`/`project` other than the Skills project ID is
-  rejected, so a misrouted client fails loudly.
-* `query.subscribe` → `query.result` now and again whenever the result changes
-  after a write. `query.unsubscribe` stops it.
-* `mutation.call` → `mutation.result` / `mutation.error`.
-* `action.call` → `action.result` / `action.error` (for `access.snapshot`).
+* `POST /api/<function>`, with the arguments as a JSON object. The function
+  names are the §2.2 paths, such as `agent.credentials.get` or
+  `team.invite`. The response is `200 {"result": …}`, or an error status
+  (400/401/403/404/409/413/429/500) with `{"error": "…"}`. The error strings
+  are the Go backend's.
+* **Credentials only in the `Authorization` header.** `Authorization: Bearer
+  <token>` carries the API key for `agent.*` functions and the session token
+  for everything else. A body that contains `apiKey` or `sessionToken` is
+  rejected with 400, so secrets never sit in request bodies that a proxy or
+  log might keep. GET is not accepted, so nothing sensitive ends up in URLs.
+* Requests are capped at 3 MiB, enough for a 2 MiB skill.
 
-So an **unmodified** `whagons-dev` binary works against the new backend by
-changing only its endpoint (`WHAGONS_DEV_WS_URL=wss://skills.whagons.com/ws`).
-The test suite drives the real Go CLI against the Worker to prove this.
+The function-per-path RPC shape was chosen over REST resources because the
+§2.2 inventory, its tests, and the UI's call sites are already function-shaped.
+Mapping them onto REST verbs would add a translation layer and change nothing
+for callers.
 
-Live queries: each socket's subscriptions (path, arguments, hash of the last
-result) are kept in the socket's hibernation attachment, capped at 16
-subscriptions and 2 KB per socket. After every committed mutation the DO
-re-runs each subscription *with its original credentials*, so a revoked key
-or session or a changed role is re-authorized. It pushes only results whose
-hash changed; an authorization failure is pushed as `query.error`. Pushes are
-debounced to one pass per write batch.
+### 4.2 CLI (`whagons-dev`) changes
 
-The owner UI's five sync collections become live queries with the same paths
-and row shapes (`skills.sync` etc.). The Gonvex IndexedDB replica is dropped:
-the whole vault is tens of kilobytes of metadata, so a fresh snapshot on
-connect is cheaper than a durable replica, and nothing about the vault is
-persisted in the browser.
-
-### 4.2 HTTP JSON (new, additive)
-
-`POST /api/<path>` with the arguments as the JSON body returns
-`200 {"result": …}` or `4xx {"error": "…"}`. If the body has no `apiKey`,
-`Authorization: Bearer skv_…` fills it in. That lets scripts use `curl` or
-`fetch` instead of a WebSocket client. The "Copy agent setup" text in the UI
-documents this instead of `@gonvex/client`. GET is not accepted, so tokens
-never appear in URLs or access logs.
+* **Transport:** the Gonvex WebSocket client and the `gorilla/websocket`
+  dependency are removed. A small HTTP client posts to
+  `<api>/api/<function>` and sends the API key as `Authorization: Bearer`.
+* **Endpoint:** `WHAGONS_DEV_API_URL`, then `apiURL` in
+  `~/.whagons-dev/config.json`, then the origin of the vault app URL
+  (`WHAGONS_DEV_APP_URL` / `appURL`, default `https://skills.whagons.com`).
+  HTTPS is required except for loopback. The old `wsURL` and `project` config
+  fields are ignored and dropped on the next config write. The API key itself
+  carries over.
+* **Daemon:** the daemon used to hold a live subscription. It now polls the
+  skill metadata list every 20 seconds and runs a full sync when the revision
+  changes, plus the usual sync every interval (default 1 minute).
+* **Release:** through the existing self-update. The daemon checks daily and
+  runs `go install github.com/whagons/skills/cli/cmd/whagons-dev@latest`, and
+  anyone can run `whagons-dev --update` immediately. Because `@latest`
+  follows this repository, **merging this change ships the new CLI**. Merge it
+  as part of the cutover (§8), not before, or developers' CLIs will point at
+  `skills.whagons.com/api` while that is still the Gonvex frontend.
 
 ### 4.3 Operator endpoints
 
@@ -261,16 +270,19 @@ storage, PITR snapshots or backups. The token must be at least 32 characters.
 
 | Change | Why |
 | --- | --- |
+| Transport is HTTP (`POST /api/<function>`); the Gonvex WebSocket protocol is gone. | Gabriel's decision: no backwards compatibility. Simpler server, nothing to keep alive. |
+| Credentials move from arguments to the `Authorization` header. | Keeps secrets out of bodies; the CLI and UI clients do this for callers. |
+| No pushed updates. The UI polls every 5 s; the CLI daemon polls skill metadata every 20 s. | No sockets to hold open. Edits reach agents within about 20 s instead of about 1 s. |
 | Timestamps are ISO-8601 UTC with millisecond precision (Postgres had microseconds). | JavaScript `Date`. Clients treat them as opaque strings or parse them with `Date.parse`. After migration, the daemon's revision string changes once, which causes one harmless re-sync. |
-| Owner UI uses live queries instead of durable sync collections. | See §4.1. Same paths and row shapes. |
 | Case-insensitive name matching uses JavaScript `toLowerCase()` on a stored `name_key`, instead of Postgres `lower()`. | Equivalent for every current name. SQLite's `lower()` is ASCII-only, so the key is computed in code. |
 | `ensureTables` DDL migrations and `SKILLS_LEGACY_OWNER_EMAIL` legacy claiming are dropped. | The schema is created once. The migration tool fails if any row still has an empty owner. |
-| New: audit log and `audit.list` (owner only). | §5.5. |
-| New: HTTP API and admin endpoints. | §4.2, §4.3. |
+| New: audit log, `audit.list`, `audit.credentialReads`, and the owner's Access log page. | §5.5. |
+| New: per-IP rate limits. | §5.7. |
+| New: admin endpoints. | §4.3. |
 
-Everything else (paths, arguments, result fields, limits, error strings,
-role semantics and owner-only rules) is ported one to one. The Worker test
-suite encodes the behaviour that the Go backend tests cover.
+Everything else (function names, arguments, result fields, limits, error
+strings, role semantics and owner-only rules) is ported one to one. The
+Worker test suite encodes the behaviour that the Go backend tests cover.
 
 ## 5. Security model
 
@@ -301,7 +313,7 @@ A credential value is returned only by `credentials.get` (session) and
    looking up by name, every row matching the name must be granted.
 4. The credential belongs to the caller's active workspace.
 
-Lists, sync collections, live queries, exports and backups never contain
+Lists, owner collections, exports and backups never contain
 values. Every value read is written to the audit log.
 
 ### 5.3 Encryption at rest
@@ -358,15 +370,23 @@ denials**, credential save/delete, skill save/upload/approve/delete, API key
 create/revoke/revokeSelf, invite/remove/accept/reject, role
 save/delete/assign, and every admin call. Not logged: list and metadata
 queries, which would be noise. Values, tokens and key hashes are never
-written. Retention is 400 days, pruned by the DO alarm. The owner reads the
-log with `audit.list` (newest first, paginated). Workers Logs record request
-metadata only; the code never logs arguments.
+written. Retention is 400 days, pruned by the DO alarm. Workers Logs record
+request metadata only; the code never logs arguments.
+
+**Access log page (decision).** A single owner-only page, "Access log", lists
+recent credential reads: when, who, through which API key or the browser,
+which secret, and whether the read was allowed or denied. It can be filtered
+by person, API key and secret, and nothing more. A denied read by name is
+recorded against the credential's ID when the name exists in the caller's
+workspace, so the secret filter finds it. The page is backed by
+`audit.credentialReads`; `audit.list` returns the full event stream for the
+owner.
 
 ### 5.6 Revocation
 
 | Action | Effect |
 | --- | --- |
-| Revoke an API key (UI, `agent.apiKeys.revoke`, `revokeSelf`) | Next call fails; live subscriptions using it receive `query.error` on the next push pass. |
+| Revoke an API key (UI, `agent.apiKeys.revoke`, `revokeSelf`) | The next call with it fails (401). |
 | Logout | Session revoked. |
 | Remove a member | Their sessions in the workspace and **every key they created** are revoked in the same transaction. |
 | Change or downgrade a role | Applies to the member's sessions and keys on their next call, because roles are evaluated per call and never cached in tokens. |
@@ -378,14 +398,22 @@ credential at its source.
 
 ### 5.7 Other hardening
 
-* Request size caps: 3 MiB per HTTP body and per WebSocket message. Skills of
-  up to 2 MiB are uploaded over the WebSocket today, so the limit has to be
-  above that.
-* At most 16 live subscriptions per socket.
-* Proposed, not yet implemented (open question 6): a Workers Rate Limiting
-  binding on `auth.login` and on failed key or session lookups per IP.
-* No cookies, so there is no CSRF surface. Browser auth is a bearer token in
-  `sessionStorage`, as today, and CSP forbids inline script.
+* **Request size:** each HTTP body is capped at 3 MiB, above the 2 MiB skill
+  limit.
+* **Rate limits (defaults chosen for this design):** implemented with the
+  Workers Rate Limiting binding and keyed by client IP (`CF-Connecting-IP`).
+  * `API_LIMIT` allows 600 API calls per 60 s per IP. A busy office behind one
+    NAT stays well under this: each daemon makes about 3 calls a minute and
+    an open owner tab about 75. Scripted guessing or abuse is still bounded.
+  * `LOGIN_LIMIT` allows 10 `auth.login` attempts per 60 s per IP.
+  * Over a limit, the API returns 429 with `Retry-After: 60`. The binding's
+    counters are per Cloudflare location and approximate, which is enough to
+    blunt abuse.
+  * API keys and session tokens are 256-bit random values, so guessing them
+    is not a realistic threat. The limits protect availability and Google
+    sign-in.
+* **No CSRF surface:** there are no cookies. Browser auth is a bearer token
+  in `sessionStorage`, as today, and CSP forbids inline script.
 
 ## 6. Data model (DO SQLite)
 
@@ -445,146 +473,164 @@ Tool: `tools/migrate/` (Node, no dependencies).
    and SHA-256 digests of canonical rows between the bundle and
    `/admin/stats`. Credential digests cover metadata only, because import
    re-encrypts legacy rows. It then calls `/admin/verify-decrypt`, which must
-   report every credential decryptable with the configured key. Finally, smoke-test with
-   the real CLI: `WHAGONS_DEV_WS_URL=wss://<worker>/ws whagons-dev
-   credentials list` and `skills list`.
+   report every credential decryptable with the configured key. Finally,
+   smoke-test with the new CLI: `WHAGONS_DEV_API_URL=https://<worker>
+   whagons-dev credentials list` and `skills list`.
 
 The tool is tested end to end against **generated fixtures**: fake users,
 skills, roles, sessions, keys, and credentials encrypted with a throwaway key
 in all three storage formats. Real production data is never used in tests,
 dev resources, logs or the repository.
 
-## 8. Cutover plan (Gabriel's call; nothing here is done yet)
+## 8. Cutover runbook (Gabriel runs it; nothing here is done yet)
 
-Prerequisites: this design approved, the implementation PR merged, the
-production Worker deployed under a non-public name and tested with
-fixtures, then emptied.
+**Decision: keep it simple, with a short manual freeze.** There is no automated
+write-freeze machinery.
 
-1. **Freeze writes, about 5 minutes.** Announce it. Gonvex has no read-only
-   switch for a project. Unset `SKILLS_SECRET_KEY` on the Gonvex project to
-   stop credential reads and writes, or accept that writes during the window
-   are lost; the vault is rarely written.
-2. **Export → transform → import → verify** (§7) into the production Worker
-   `skills-vault`, with the production `SKILLS_SECRET_KEY` and the
-   `SKILLS_ALLOWED_*` variables set as Worker secrets and variables.
-3. **Switch the browser.** Attach `skills.whagons.com` as the Worker's
-   custom domain. This replaces the proxied DNS record that points at Coolify,
-   and is the only DNS change. Add the Worker origin to the Google OAuth
-   client's authorized JavaScript origins (unchanged if the hostname stays the
-   same).
-4. **Switch the CLIs.** Pick one:
-   * **(a) Recommended, zero touch:** a temporary Worker route on
-     `gonvex.whagons.com/ws*`. The route forwards WebSockets whose
-     `?project=` is the Skills project to the vault Worker, and passes
-     everything else to the origin untouched, so other Gonvex projects are
-     unaffected. Every existing CLI and script keeps working with no
-     change. Remove the route after ~30 days.
-   * **(b) No route on the Gonvex hostname:** rely on (5) and the daemon's
-     daily self-update. CLIs that are not updated fail loudly until they
-     update, or until someone sets `WHAGONS_DEV_WS_URL`. They cannot read stale
-     data, because step 1 disabled the old project.
-5. **Release `whagons-dev` vNext.** It changes the default to
-   `wss://skills.whagons.com/ws` and adds a rule to `migrateLegacyRuntime`
-   that rewrites the exact old default (`wss://gonvex.whagons.com/ws` with the
-   Skills project ID) in existing configs. Custom endpoints are never rewritten.
-6. **Unset `ADMIN_TOKEN`.** Keep the Gonvex project and its database
+**Before the day**
+* The production Worker `skills-vault` is deployed on its `workers.dev` URL
+  with `SKILLS_SECRET_KEY` set to the current production key and the
+  `SKILLS_ALLOWED_*` / `SKILLS_GOOGLE_CLIENT_ID` values copied from the Gonvex
+  `skills` project. All of them are Worker secrets. Set a temporary
+  `ADMIN_TOKEN` too.
+* Do a rehearsal: export, transform, import and verify (§7) into it. Smoke-test
+  with `WHAGONS_DEV_API_URL=https://skills-vault.<sub>.workers.dev`. Leave the
+  data there or re-import on the day with `--replace`.
+* Check that you can reach the Gonvex Postgres container for the read-only
+  export, and that you hold a Cloudflare token allowed to attach a custom
+  domain on whagons.com (`cloudflare_dns_access` or broader).
+* PR #12 is reviewed but **not merged**. Merging it releases the new CLI.
+
+**On the day** (about 15 minutes)
+1. **Announce the freeze:** "don't add or change secrets or skills in the
+   vault until I say so."
+2. **Final export → transform → import (`--replace`) → verify** (§7). Verify must
+   print `verify ok` with every credential decrypting.
+3. **Switch DNS:** attach `skills.whagons.com` as the Worker's custom domain.
+   This replaces the proxied record that points at Coolify. Then set
+   `"workers_dev": false` in `wrangler.jsonc` and redeploy. Check that sign-in
+   works in a browser: the hostname is unchanged, so the Google OAuth client
+   needs no change.
+4. **Switch the CLI endpoint:** merge PR #12. Its CLI defaults to
+   `https://skills.whagons.com/api`. Daemons pick it up through their daily
+   self-update; anyone can run `whagons-dev --update` immediately. Until a
+   machine updates, its old CLI keeps talking to Gonvex and fails after step 5,
+   which is visible and harmless. The API key in each config keeps working,
+   because key hashes were migrated.
+5. **Stop the old vault:** make the Gonvex `skills` project read-only or stop
+   it. The simplest option is removing `SKILLS_SECRET_KEY` from the project,
+   so credential reads and writes there fail closed. Leave its database
    untouched for 30 days as the rollback source.
+6. **Lift the freeze** and unset `ADMIN_TOKEN` on the Worker.
 
-Expected downtime is the freeze window. Browser sessions and CLI keys survive,
-because token hashes are copied.
+Browser sessions and CLI keys survive, because token hashes are copied.
+Expected disruption is the freeze window plus the time until each machine's
+CLI updates.
 
 ## 9. Rollback
 
-* **Before step 3:** nothing public has changed; delete the Worker.
-* **After cutover, no writes worth keeping:** detach the custom domain,
-  restore the original proxied DNS record for `skills.whagons.com` (note it
-  before cutover), remove the `gonvex.whagons.com/ws*` route, and restore
-  `SKILLS_SECRET_KEY` on the Gonvex project. The old database was never
-  modified, so it is exactly the pre-cutover state.
+* **Before step 3:** nothing public has changed. The Worker can stay or be
+  deleted.
+* **After cutover, with no writes worth keeping:**
+  * Detach the custom domain and restore the original proxied DNS record for
+    `skills.whagons.com` (note it before cutover).
+  * Restore `SKILLS_SECRET_KEY` on the Gonvex project, or restart it.
+  * Revert the CLI change on `main`; daemons self-update back.
+  * The old database was never modified, so it is exactly the pre-cutover
+    state.
 * **After cutover, with new writes:** `migrate export --url …` pulls
-  `/admin/export` (ciphertext and hashes only) and `migrate to-postgres`
-  turns it into idempotent `INSERT … ON CONFLICT DO UPDATE` SQL for the
-  Gonvex tables. Gabriel reviews and applies it, then follows the step above.
+  `/admin/export` (ciphertext and hashes only), and `migrate to-postgres` turns
+  it into idempotent `INSERT … ON CONFLICT DO UPDATE` SQL for the Gonvex
+  tables. Gabriel reviews and applies it, then follows the step above.
   Because the encryption format is shared, ciphertext moves back unchanged.
 * **Data loss inside Cloudflare:** restore from DO point-in-time recovery
   (30 days) or from the nightly R2 export via `/admin/import?replace=1`.
-* If a CLI vNext with the new default has shipped, rolling back also means
-  setting `WHAGONS_DEV_WS_URL` or shipping a CLI that reverts the default.
-  This is why (4a) is recommended: it lets CLI vNext ship only after the new
-  backend has proved itself.
 
 ## 10. Cost
 
 The Cloudflare account already has **Workers Paid** ($5/month base, already
-paid) and **R2 Paid**. Expected usage, assuming 10 developers each running
-the sync daemon, which reconnects about twice a minute:
+paid) and **R2 Paid**. Assumptions:
+* 10 developers, each running the daemon. It makes about 3 metadata checks a
+  minute, with full syncs only on change or every 30 minutes.
+* About two owner or member browser tabs open during working hours. They poll
+  every 5 s while visible.
 
 | Item | Estimate / month | Included | Marginal cost |
 | --- | --- | --- | --- |
-| Worker requests | ~1.5 M | 10 M | $0 |
-| DO requests (connects, RPC, WS messages at 20:1) | ~1 M | 1 M | ≤ $0.15 |
-| DO duration (hibernating sockets; awake only on traffic) | < 50 k GB-s | 400 k GB-s | $0 |
-| DO SQLite storage / rows | < 50 MB; < 10 M rows read | 5 GB; 25 B rows | $0 |
+| Worker requests | ~2.5 M | 10 M | $0 |
+| DO requests (each API call is one) | ~2.5 M | 1 M | ~$0.25 at $0.15/M |
+| DO duration (128 MB; one object; worst case awake all month) | ≤ 330 k GB-s | 400 k GB-s | $0 |
+| DO SQLite storage / rows | < 50 MB; < 50 M rows read | 5 GB; 25 B rows | $0 |
 | R2 storage (35 daily backups × ~10 MB) | ~0.35 GB | 10 GB | $0 |
+| Rate Limiting binding | — | included | $0 |
 
-**Expected marginal cost: under $1/month**. The worst case is the $5 base,
-if Workers Paid were ever dropped for everything else. Compare: today the vault
-shares a production server, and its real cost is the outage coupling.
+**Expected marginal cost: about $0.25/month, under $1/month even at 50
+developers.** The worst case is the $5 base, if Workers Paid were ever dropped
+for everything else.
 
 ## 11. Testing and CI
 
-* `worker/test/*.test.ts` runs inside **workerd** (`@cloudflare/vitest-pool-workers`)
-  against a real DO with SQLite. It covers the auth matrix (owner, member,
-  pending, removed, downgraded, expired, revoked), the API key escalation rules,
-  skill publish rules, credential crypto (including Go-generated vectors and
-  legacy formats), live-query pushes and re-authorization, the HTTP API,
-  admin gating, and audit records.
-* The real `whagons-dev` binary is exercised against `wrangler dev` (and the
-  deployed dev Worker) via `WHAGONS_DEV_WS_URL`.
-* Migration tool tests: generate fixtures → transform → import into workerd →
-  verify digests → export → `to-postgres` round trip.
-* `tools/crosscheck/` extracts the credential crypto from `gonvex/skills.go`
-  by Go AST, not by hand, and checks it against the Worker in both
-  directions, including rotation and `encv1`.
-* `tools/e2e/cli-against-worker.sh` runs the unmodified `whagons-dev` binary
-  against `wrangler dev` or the dev Worker under a throwaway `$HOME`:
-  migrate, `auth set-key`, `credentials list/exec/set`,
-  `skills list/get/update`, the daemon's live push, and `auth logout`
-  revocation.
-* CI job `worker` runs all of the above plus typechecks and a dry-run bundle.
-  It never deploys. The existing `web` and `cli` jobs are unchanged.
-* Dev deployment: Worker `skills-cf-dev-vault` and bucket `skills-cf-dev-blobs`,
-  with a random dev key and fixture data only.
+* **Worker:** `worker/test/*.test.ts` runs inside **workerd**
+  (`@cloudflare/vitest-plugin`) against a real DO with SQLite. It covers:
+  * the auth matrix (owner, member, pending, removed, downgraded, expired,
+    revoked) and the API key escalation rules;
+  * skill publish rules;
+  * credential crypto, including Go-generated vectors and legacy formats;
+  * the HTTP contract, including credentials refused in bodies and size and
+    path errors;
+  * login rate limiting;
+  * the access-log query and its filters;
+  * admin gating, migration, and backups.
+* **CLI:** `cli/` tests run against an `httptest` fake of the HTTP API. They
+  cover endpoint resolution, dropping old Gonvex config fields, and the
+  daemon's change detection.
+* **Migration tool:** tests on generated fixtures run transform, import into
+  workerd, verify digests, export, and the `to-postgres` round trip.
+* **Crypto cross-check:** `tools/crosscheck/` extracts the credential crypto
+  from `gonvex/skills.go` by Go AST, not by hand, and checks it against the
+  Worker in both directions, including rotation and `encv1`.
+* **End to end:** `tools/e2e/cli-against-worker.sh` builds `whagons-dev` from
+  this checkout and runs it against `wrangler dev` or the dev Worker under a
+  throwaway `$HOME`. It covers migration, `auth set-key`,
+  `credentials list/exec/set`, `skills list/get/update`, the daemon picking
+  up a newly published skill, and `auth logout` revocation.
+* **CI:** job `worker` runs the Worker, migration, crypto and end-to-end
+  checks, plus typechecks and a dry-run bundle. It never deploys. The `cli`
+  job runs the CLI tests on Linux, macOS and Windows.
+* **Dev deployment:** Worker `skills-cf-dev-vault` and bucket
+  `skills-cf-dev-blobs`, with a random dev key and fixture data only.
 
 ## 12. Findings from building it
 
-* **Message size.** A 2,080,059-byte `SKILL.md` was uploaded by the real CLI
-  over `wss://` through Cloudflare to the dev Worker, and was stored through
-  the R2 overflow path. The 2 MiB skill contract holds on Workers.
+* **Size limit holds.** A 2,080,059-byte `SKILL.md` went through Cloudflare to
+  the dev Worker and was stored through the R2 overflow path. The 2 MiB skill
+  contract holds on Workers.
 * **Google login on dev.** The Google OAuth client does not list the
-  `*.workers.dev` origin. On dev, the UI was therefore exercised with a
-  migrated fixture session, which is also what proves that sessions survive
-  migration. Before cutover, nothing changes in Google if the hostname stays
-  `skills.whagons.com`.
+  `*.workers.dev` origins, so Google sign-in fails there with
+  `origin_mismatch`. On dev, the UI was exercised with a migrated fixture
+  session, which also proves that sessions survive migration.
+  `skills.whagons.com` is already allowed, so production needs no Google
+  change.
 * **Existing CSP finding (unchanged here, for parity).** Google Identity
   Services tries to load `https://accounts.google.com/gsi/style`, which the
   current `style-src` blocks. It only logs a console error. Adding that URL to
   `style-src` in both `nginx.conf` and the Worker is a one-line follow-up.
-* **CLI needs no code change to work.** CLI vNext (§8 step 5) is only a default
-  and config migration, and it must not merge before cutover: the daemon's
-  self-update would move every developer to the new endpoint early.
+* **Daemon request rate.** Over a socket, re-downloading every skill each
+  minute was nearly free. Over HTTP it would have been one request per skill
+  per minute per developer. The daemon now checks metadata every 20 s and
+  re-downloads only on change, with a full resync at most every 30 minutes.
 
-## 13. Open questions for Gabriel
+## 13. Decisions (Gabriel)
 
-1. **CLI switch:** route shim on `gonvex.whagons.com/ws*` (4a) or rely on CLI
-   self-update (4b)?
-2. **DO location:** pin `locationHint` (for example `enam`/`weur`) near where
-   most developers and agents run, or let it follow the first request?
-3. **Audit UI:** is the `audit.list` API enough for now, or should the
-   Team tab show an activity feed in this change?
-4. **Freeze method:** is it acceptable to unset `SKILLS_SECRET_KEY` on the
-   Gonvex project at cutover? This is the only change to the old backend.
-5. **Production Worker name:** `skills-vault` (proposed), with dev as
-   `skills-cf-dev-vault`.
-6. **Rate limiting:** add the Workers Rate Limiting binding for login now, or
-   later?
+1. **No backwards compatibility.** The Worker exposes only the HTTP API (§4.1,
+   [`API.md`](API.md)). `whagons-dev` in `cli/` uses it at a configurable
+   endpoint and ships through self-update. There is no route on
+   `gonvex.whagons.com`.
+2. **DO location: `enam`.**
+3. **Audit UI:** one owner-only Access log page for credential reads,
+   filterable by person, key and secret (§5.5).
+4. **Freeze:** a short manual freeze, as in the §8 runbook.
+5. **Defaults chosen here.** The production Worker is `skills-vault`, with R2
+   bucket `skills-vault-blobs`; dev uses `skills-cf-dev-vault` and
+   `skills-cf-dev-blobs`. Rate limits are 600 API calls and 10 sign-ins per
+   minute per IP (§5.7).
