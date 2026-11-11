@@ -12,8 +12,9 @@ export interface Env {
   SKILLS_ALLOWED_DOMAINS?: string;
   SKILLS_PROJECT_ID?: string;
   ADMIN_TOKEN?: string;
-  GONVEX_PASSTHROUGH_HOST?: string;
   VAULT_LOCATION_HINT?: string;
+  API_LIMIT?: RateLimit;
+  LOGIN_LIMIT?: RateLimit;
 }
 
 export const DEFAULT_PROJECT_ID = "01f1974b-dcda-6fc3-b16d-9acf5f3b4192";
@@ -62,7 +63,6 @@ export type AuditEvent = {
 // Per-call context: SQL access, configuration and the authenticated actor.
 export class Ctx {
   actor: Actor | null = null;
-  quiet = false; // live-query re-runs never write audit rows
   private contentCache: Map<string, string>;
 
   constructor(
@@ -113,7 +113,6 @@ export class Ctx {
   }
 
   audit(event: AuditEvent): void {
-    if (this.quiet) return;
     const actor = this.actor;
     const email = actor && actor.via !== "admin" ? this.one<{ email: string }>("select email from skill_users where owner_id = ?", actor.id)?.email ?? "" : "";
     this.run(

@@ -1,8 +1,8 @@
-// Worker entry: static UI with security headers, the Gonvex-compatible
-// WebSocket at /ws, the JSON API at /api/<path>, operator endpoints at
+// Worker entry: the static UI with security headers, the JSON API at
+// POST /api/<function> (docs/cloudflare/API.md), operator endpoints at
 // /admin/* (off unless ADMIN_TOKEN is set), and the nightly R2 backup.
 
-import { DEFAULT_PROJECT_ID, type Env, type Meta } from "./context";
+import { type Env, type Meta } from "./context";
 import { FUNCTIONS } from "./functions";
 import { timingSafeEqualString } from "./util";
 import type { CallResult, Vault } from "./vault";
@@ -11,15 +11,12 @@ export { Vault } from "./vault";
 
 const MAX_BODY_BYTES = 3 << 20;
 const ADMIN_OPS = new Set(["stats", "export", "import", "verify-decrypt", "reencrypt"]);
+const CREDENTIAL_FIELDS = ["apiKey", "sessionToken"];
 
 function vault(env: Env): DurableObjectStub<Vault> {
   const hint = (env.VAULT_LOCATION_HINT ?? "").trim();
   const id = env.VAULT.idFromName("vault");
   return hint ? env.VAULT.get(id, { locationHint: hint as DurableObjectLocationHint }) : env.VAULT.get(id);
-}
-
-function projectID(env: Env): string {
-  return (env.SKILLS_PROJECT_ID ?? "").trim() || DEFAULT_PROJECT_ID;
 }
 
 function meta(request: Request): Meta {
@@ -30,14 +27,18 @@ function meta(request: Request): Meta {
   };
 }
 
-const json = (value: unknown, status = 200) =>
+const json = (value: unknown, status = 200, extra: Record<string, string> = {}) =>
   new Response(JSON.stringify(value), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...extra },
   });
 
 function fromResult(result: CallResult): Response {
   return result.ok ? json({ result: result.result }) : json({ error: result.error }, result.status);
+}
+
+function bearer(request: Request): string {
+  return request.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
 }
 
 async function readJSON(request: Request): Promise<{ value?: unknown; error?: Response }> {
@@ -53,13 +54,20 @@ async function readJSON(request: Request): Promise<{ value?: unknown; error?: Re
   }
 }
 
+// Rate limits (DESIGN.md §5.7), keyed by client IP. Requests without
+// CF-Connecting-IP (local development and tests) are not limited.
+async function limited(binding: RateLimit | undefined, ip: string): Promise<boolean> {
+  if (!binding || !ip) return false;
+  const { success } = await binding.limit({ key: ip });
+  return !success;
+}
+
 export function securityHeaders(url: URL): Record<string, string> {
   const secure = url.protocol === "https:";
-  const socket = `${secure ? "wss" : "ws"}://${url.host}`;
   const csp = [
     "default-src 'self'",
     "script-src 'self' https://accounts.google.com https://static.cloudflareinsights.com",
-    `connect-src 'self' ${socket} http://127.0.0.1:* https://cloudflareinsights.com`,
+    "connect-src 'self' http://127.0.0.1:* https://cloudflareinsights.com",
     "frame-src https://accounts.google.com",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self'",
@@ -81,21 +89,24 @@ export function securityHeaders(url: URL): Record<string, string> {
   };
 }
 
-async function handleSocket(request: Request, env: Env, url: URL): Promise<Response> {
-  const project = url.searchParams.get("project");
-  if (project !== null && project !== projectID(env)) return new Response("unknown project", { status: 404 });
-  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("expected websocket", { status: 426 });
-  return vault(env).fetch(request);
-}
-
 async function handleAPI(request: Request, env: Env, path: string): Promise<Response> {
-  if (request.method !== "POST") return json({ error: "use POST with a JSON body" }, 405);
+  if (request.method !== "POST") return json({ error: "use POST with a JSON body" }, 405, { Allow: "POST" });
   if (!Object.hasOwn(FUNCTIONS, path)) return json({ error: `unknown function: ${path}` }, 404);
+  const { ip } = meta(request);
+  if (await limited(env.API_LIMIT, ip)) return json({ error: "too many requests; slow down" }, 429, { "Retry-After": "60" });
+  if (path === "auth.login" && (await limited(env.LOGIN_LIMIT, ip))) {
+    return json({ error: "too many sign-in attempts; try again in a minute" }, 429, { "Retry-After": "60" });
+  }
   const body = await readJSON(request);
   if (body.error) return body.error;
-  const args = body.value && typeof body.value === "object" && !Array.isArray(body.value) ? { ...(body.value as Record<string, unknown>) } : {};
-  const bearer = request.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
-  if (bearer && args.apiKey === undefined && path.startsWith("agent.")) args.apiKey = bearer;
+  if (!body.value || typeof body.value !== "object" || Array.isArray(body.value)) return json({ error: "request body must be a JSON object" }, 400);
+  const args = { ...(body.value as Record<string, unknown>) };
+  // Credentials travel only in the Authorization header, never in bodies.
+  if (CREDENTIAL_FIELDS.some((field) => Object.hasOwn(args, field))) {
+    return json({ error: "send the API key or session token in the Authorization header, not the body" }, 400);
+  }
+  const token = bearer(request);
+  if (token) args[path.startsWith("agent.") ? "apiKey" : "sessionToken"] = token;
   return fromResult(await vault(env).call(path, args, meta(request)));
 }
 
@@ -104,8 +115,7 @@ async function handleAdmin(request: Request, env: Env, url: URL, op: string): Pr
   // Disabled unless the operator sets ADMIN_TOKEN; indistinguishable from a
   // missing route so the endpoint's existence is not advertised.
   if (configured.length < 32) return new Response("not found", { status: 404 });
-  const supplied = request.headers.get("Authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
-  if (!timingSafeEqualString(supplied, configured)) return json({ error: "unauthorized" }, 401);
+  if (!timingSafeEqualString(bearer(request), configured)) return json({ error: "unauthorized" }, 401);
   if (!ADMIN_OPS.has(op)) return json({ error: "unknown admin operation" }, 404);
   const mutating = op === "import" || op === "reencrypt";
   if (request.method !== "POST" && (mutating || request.method !== "GET")) return json({ error: "method not allowed" }, 405);
@@ -133,19 +143,9 @@ async function handleAssets(request: Request, env: Env, url: URL): Promise<Respo
 }
 
 export default {
-  async fetch(request, env, ctx): Promise<Response> {
+  async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
-
-    // Optional cutover shim (DESIGN.md §8 4a): when routed on the Gonvex
-    // hostname, take only Skills-project sockets and pass the rest through.
-    const passthrough = (env.GONVEX_PASSTHROUGH_HOST ?? "").trim().toLowerCase();
-    if (passthrough && url.hostname.toLowerCase() === passthrough) {
-      if (url.pathname === "/ws" && url.searchParams.get("project") === projectID(env)) return handleSocket(request, env, url);
-      return fetch(request);
-    }
-
     if (url.pathname === "/health") return new Response("ok\n", { headers: { "Content-Type": "text/plain" } });
-    if (url.pathname === "/ws") return handleSocket(request, env, url);
     if (url.pathname.startsWith("/api/")) {
       let path: string;
       try {
@@ -156,7 +156,6 @@ export default {
       return handleAPI(request, env, path);
     }
     if (url.pathname.startsWith("/admin/")) return handleAdmin(request, env, url, url.pathname.slice(7));
-    void ctx;
     return handleAssets(request, env, url);
   },
 

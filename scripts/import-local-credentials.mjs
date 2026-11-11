@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { GonvexClient } from "@gonvex/client";
+import { callVault } from "./vault-api.mjs";
 
 const defaultCredentialFile = `${process.env.HOME}/.secrets/keys.json`;
 const credentialFile = process.env.SKILLS_CREDENTIAL_IMPORT_FILE || defaultCredentialFile;
@@ -14,10 +14,6 @@ const credentialNames = (process.env.SKILLS_CREDENTIAL_IMPORT_NAMES || [
   .map((name) => name.trim())
   .filter(Boolean);
 
-function devJWT() {
-  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub: "skills-credential-import", email: "skills@whagons.local" })}.import`;
-}
 
 function summarizeCredential(name, value) {
   if (name.startsWith("coolify-")) return `Coolify credential for ${name.replace("coolify-", "")}`;
@@ -43,15 +39,8 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex.whagons.com/ws");
-wsURL.searchParams.set("project", process.env.VITE_GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192");
 
-const client = new GonvexClient(wsURL.toString(), {
-  token: devJWT(),
-  tenant: process.env.VITE_GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
-});
-
-try {
+{
   let imported = 0;
   let skipped = 0;
   for (const name of credentialNames) {
@@ -61,20 +50,14 @@ try {
       console.log(`skipped ${name}`);
       continue;
     }
-    await client.mutation(
-      { kind: "mutation", path: "agent.credentials.save" },
-      {
-        apiKey,
-        id: `credential-${name}`,
-        name,
-        summary: summarizeCredential(name, value),
-        value: JSON.stringify(value),
-      },
-    );
+    await callVault("agent.credentials.save", {
+      id: `credential-${name}`,
+      name,
+      summary: summarizeCredential(name, value),
+      value: JSON.stringify(value),
+    }, apiKey);
     imported += 1;
     console.log(`imported ${name}`);
   }
   console.log(`done: ${imported} imported, ${skipped} skipped`);
-} finally {
-  client.close();
 }

@@ -11,6 +11,7 @@ import {
   Eye,
   EyeOff,
   Fingerprint,
+  History,
   KeyRound,
   LibraryBig,
   Link2,
@@ -29,7 +30,7 @@ import {
   Vault,
   X,
 } from "lucide-react";
-import { api, backendHost, backendLabel, backendStatus, scriptAPIGuide, useConvex, useMutation, useSync } from "@backend";
+import { api, backendFeatures, backendHost, backendLabel, backendStatus, scriptAPIGuide, useConvex, useMutation, useSync } from "@backend";
 import { Avatar, AvatarFallback } from "./components/ui/avatar";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -39,6 +40,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip
 import { getAuthErrorMessage } from "./lib/auth-error";
 import { RolePicker } from "./components/RolePicker";
 import { AccessRoles } from "./components/AccessRoles";
+import { AccessLog } from "./components/AccessLog";
 import { accessAPI, canAccess, resourceSummary, type AccessState } from "./lib/access";
 import { dedupeCredentials } from "./lib/credentials";
 import { invitationInstructions } from "./lib/invitations";
@@ -465,6 +467,7 @@ export default function App() {
   const acceptInvitation = useMutation(api.team.invitations.accept);
   const rejectInvitation = useMutation(api.team.invitations.reject);
   const isWorkspaceOwner = me?.is_owner ?? false;
+  const showAccessLog = backendFeatures.accessLog && isWorkspaceOwner;
   const allowed = (scope: string, id = "") => isWorkspaceOwner || canAccess(accessState?.role, scope, id);
   const permittedKeyScopes = isWorkspaceOwner ? cliScopes : accessState?.role.scopes ?? [];
   const saveRole = useMutation(accessAPI.saveRole);
@@ -1103,6 +1106,13 @@ export default function App() {
             <span>Team</span>
             <small>{teamMembers.length.toString().padStart(2, "0")}</small>
           </button>
+          {showAccessLog ? (
+            <button className={activeTab === "accessLog" ? "tabButton active" : "tabButton"} type="button" onClick={() => changeVaultTab("accessLog")}>
+              <span className="tabIcon"><History size={17} /></span>
+              <span>Access log</span>
+              <small />
+            </button>
+          ) : null}
         </div>
 
         {activeTab === "skills" ? (
@@ -1151,16 +1161,18 @@ export default function App() {
         ) : (
           <div className="sidebarHint">
             <div className="sidebarHintIcon">
-              {activeTab === "apiKeys" ? <Fingerprint size={20} /> : activeTab === "credentials" ? <Vault size={20} /> : <Users size={20} />}
+              {activeTab === "apiKeys" ? <Fingerprint size={20} /> : activeTab === "credentials" ? <Vault size={20} /> : activeTab === "accessLog" ? <History size={20} /> : <Users size={20} />}
             </div>
             <strong>
               {activeTab === "apiKeys" ? `${activeAPIKeys.length} active keys`
                 : activeTab === "credentials" ? `${credentials.length} credentials`
+                : activeTab === "accessLog" ? "Credential reads"
                 : `${activeTeamMembers.length} active · ${pendingTeamMembers.length} pending`}
             </strong>
             <span>
               {activeTab === "apiKeys" ? "Create and revoke agent access."
                 : activeTab === "credentials" ? "Store secrets for CLI and agents."
+                : activeTab === "accessLog" ? "Who read which secret, and when."
                 : "Share this workspace with teammates."}
             </span>
           </div>
@@ -1601,6 +1613,15 @@ export default function App() {
               </Card>
             </div>
           </>
+        ) : null}
+
+        {activeTab === "accessLog" && showAccessLog ? (
+          <AccessLog
+            sessionToken={sessionToken}
+            people={[...new Set([me?.email ?? "", ...activeTeamMembers.map((member) => member.email)].filter(Boolean))]}
+            keys={apiKeys.map((key) => ({ id: key.id, label: `${key.name} (${key.prefix}…)` }))}
+            secrets={credentials.map((credential) => ({ id: credential.id, label: credential.name }))}
+          />
         ) : null}
 
         {activeTab === "team" ? (

@@ -19,9 +19,6 @@ export type FunctionKind = "query" | "mutation" | "action" | "sync";
 export type FunctionDef = {
   kind: FunctionKind;
   handler: Handler;
-  // Queries re-run for live subscriptions after writes. Point reads of secret
-  // values are one-shot so a subscription never re-reads (and re-audits) them.
-  live?: boolean;
   // Network work done before the call is serialized (Google token checks).
   prepare?: (c: Ctx, args: Args) => Promise<unknown>;
 };
@@ -288,9 +285,20 @@ async function auditedRead<T extends { id: string; name: string }>(c: Ctx, args:
     return credential;
   } catch (error) {
     const status = error instanceof VaultError ? error.status : 500;
+    // Resolve a by-name request to the credential's ID (and canonical name)
+    // in the caller's workspace so the access log can be filtered by secret.
+    let targetID = s(args.id).trim();
+    let targetName = s(args.name).trim();
+    if (c.actor?.workspace && (targetID || targetName)) {
+      const row = c.one<{ id: string; name: string }>(
+        "select id, name from skill_credentials where owner_id = ? and ((? <> '' and id = ?) or (? <> '' and name_key = ?)) limit 1",
+        c.actor.workspace, targetID, targetID, targetName, targetName.toLowerCase(),
+      );
+      if (row) [targetID, targetName] = [row.id, row.name];
+    }
     c.audit({
       action: "credential.read", outcome: status === 401 || status === 403 ? "denied" : "error", targetType: "credential",
-      targetID: s(args.id).slice(0, 240), targetName: s(args.name).slice(0, 120), detail: error instanceof Error ? error.message : "",
+      targetID: targetID.slice(0, 240), targetName: targetName.slice(0, 120), detail: error instanceof Error ? error.message : "",
     });
     throw error;
   }
@@ -495,7 +503,8 @@ function skillSyncRow(row: Row): Row {
 }
 
 // ---------------------------------------------------------------------------
-// Owner sync collections (now live queries with the same row shapes).
+// Owner collections. Same row shapes as the Gonvex sync collections; the UI
+// polls them.
 
 async function verifyWorkspaceSync(c: Ctx, args: Args): Promise<Identity> {
   const identity = await verifySessionIdentity(c, args.sessionToken);
@@ -525,7 +534,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return result;
   } },
 
-  "auth.me": { kind: "query", live: true, handler: async (c, args) => {
+  "auth.me": { kind: "query", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
     const owner = isOwner(identity);
     const user = lookupUser(c, identity.ownerID);
@@ -535,7 +544,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     };
   } },
 
-  "auth.workspaces": { kind: "query", live: true, handler: async (c, args) => {
+  "auth.workspaces": { kind: "query", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
     const user = lookupUser(c, identity.ownerID);
     if (!user) throw new VaultError("user not found", 404);
@@ -556,7 +565,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return { ...workspace, active: true };
   } },
 
-  "team.list": { kind: "query", live: true, handler: async (c, args) => {
+  "team.list": { kind: "query", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
     if (identity.pendingOnly) throw deny(PENDING_ERROR);
     return c.all(
@@ -645,7 +654,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return deleted(true);
   } },
 
-  "team.invitations.list": { kind: "query", live: true, handler: async (c, args) => {
+  "team.invitations.list": { kind: "query", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
     const user = lookupUser(c, identity.ownerID);
     if (!user) throw new VaultError("user not found", 404);
@@ -705,7 +714,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return deleted(count > 0);
   } },
 
-  "skills.list": { kind: "query", live: true, handler: async (c, args) => {
+  "skills.list": { kind: "query", handler: async (c, args) => {
     const workspace = await verifySession(c, args.sessionToken);
     const { role } = await callerRole(c, args.sessionToken, false);
     return filterRole(listSkills(c, workspace, false), role, SCOPES.skillsRead);
@@ -749,7 +758,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return result;
   } },
 
-  "apiKeys.list": { kind: "query", live: true, handler: (c, args) => visibleAPIKeys(c, args.sessionToken) },
+  "apiKeys.list": { kind: "query", handler: (c, args) => visibleAPIKeys(c, args.sessionToken) },
 
   "apiKeys.create": { kind: "mutation", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
@@ -770,7 +779,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return revokeAPIKey(c, identity.workspaceID, args.id);
   } },
 
-  "credentials.list": { kind: "query", live: true, handler: async (c, args) => {
+  "credentials.list": { kind: "query", handler: async (c, args) => {
     const workspace = await verifySession(c, args.sessionToken);
     const { role } = await callerRole(c, args.sessionToken, false);
     return filterRole(listCredentialMeta(c, workspace), role, SCOPES.credentialsRead);
@@ -798,9 +807,9 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return { state, vault };
   } },
 
-  "access.state": { kind: "query", live: true, handler: async (c, args) => accessState(c, await verifySessionIdentity(c, args.sessionToken)) },
+  "access.state": { kind: "query", handler: async (c, args) => accessState(c, await verifySessionIdentity(c, args.sessionToken)) },
 
-  "access.vault": { kind: "query", live: true, handler: (c, args) => accessVault(c, args) },
+  "access.vault": { kind: "query", handler: (c, args) => accessVault(c, args) },
 
   "access.saveRole": { kind: "mutation", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
@@ -877,7 +886,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return deleted(true);
   } },
 
-  "skills.sync": { kind: "sync", live: true, handler: async (c, args) => {
+  "skills.sync": { kind: "sync", handler: async (c, args) => {
     const identity = await verifyWorkspaceSync(c, args);
     const rows: Row[] = [];
     for (const row of c.all("select * from skills where owner_id = ? order by updated_at desc", identity.workspaceID)) {
@@ -886,7 +895,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return rows;
   } },
 
-  "apiKeys.sync": { kind: "sync", live: true, handler: async (c, args) => {
+  "apiKeys.sync": { kind: "sync", handler: async (c, args) => {
     const identity = await verifyWorkspaceSync(c, args);
     return c.all(
       "select id, owner_id, created_by, name, prefix, scopes, created_at, expires_at, revoked_at from skill_api_keys where owner_id = ? order by created_at desc",
@@ -894,17 +903,17 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     );
   } },
 
-  "credentials.sync": { kind: "sync", live: true, handler: async (c, args) => {
+  "credentials.sync": { kind: "sync", handler: async (c, args) => {
     const identity = await verifyWorkspaceSync(c, args);
     return c.all("select id, owner_id, name, summary, created_at, updated_at from skill_credentials where owner_id = ? order by updated_at desc", identity.workspaceID);
   } },
 
-  "team.membersSync": { kind: "sync", live: true, handler: async (c, args) => {
+  "team.membersSync": { kind: "sync", handler: async (c, args) => {
     const identity = await verifyWorkspaceSync(c, args);
     return c.all("select id, workspace_owner_id, email, invited_by, created_at from skill_workspace_members where workspace_owner_id = ? order by created_at desc", identity.workspaceID);
   } },
 
-  "team.invitationsSync": { kind: "sync", live: true, handler: async (c, args) => {
+  "team.invitationsSync": { kind: "sync", handler: async (c, args) => {
     const identity = await verifyWorkspaceSync(c, args);
     return c.all(
       "select id, workspace_owner_id, email, invited_by, created_at, accepted_at, rejected_at from skill_workspace_invitations where workspace_owner_id = ? order by created_at desc",
@@ -912,7 +921,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     );
   } },
 
-  "audit.list": { kind: "query", live: true, handler: async (c, args) => {
+  "audit.list": { kind: "query", handler: async (c, args) => {
     const identity = await verifySessionIdentity(c, args.sessionToken);
     requireOwner(identity, "only the workspace owner can read the audit log");
     const limit = Math.min(Math.max(Math.trunc(Number(args.limit) || 100), 1), 500);
@@ -924,9 +933,32 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     );
   } },
 
+  // Owner-only view of credential reads (who, what, when, allowed or denied),
+  // filterable by person, API key and secret. Backs the UI's Access log page.
+  "audit.credentialReads": { kind: "query", handler: async (c, args) => {
+    const identity = await verifySessionIdentity(c, args.sessionToken);
+    requireOwner(identity, "only the workspace owner can read the audit log");
+    const limit = Math.min(Math.max(Math.trunc(Number(args.limit) || 200), 1), 500);
+    const actor = s(args.actor_email).trim().toLowerCase();
+    const key = s(args.api_key_id).trim();
+    const credential = s(args.credential_id).trim();
+    const before = s(args.before) || "9999";
+    return c.all(
+      `select e.id, e.at, e.actor_id, e.actor_email, e.via, e.api_key_id, coalesce(k.name, '') as api_key_name,
+              coalesce(k.prefix, '') as api_key_prefix, e.target_id as credential_id, e.target_name as credential_name,
+              case e.outcome when 'ok' then 'allowed' when 'denied' then 'denied' else 'failed' end as result,
+              e.detail, e.ip
+       from audit_events e left join skill_api_keys k on k.id = e.api_key_id and k.owner_id = e.workspace_id
+       where e.workspace_id = ? and e.action = 'credential.read' and e.at < ?
+         and (? = '' or lower(e.actor_email) = ?) and (? = '' or e.api_key_id = ?) and (? = '' or e.target_id = ?)
+       order by e.at desc, e.id desc limit ?`,
+      identity.workspaceID, before, actor, actor, key, key, credential, credential, limit,
+    );
+  } },
+
   // Agent (API key) functions.
 
-  "agent.skills.list": { kind: "query", live: true, handler: async (c, args) => {
+  "agent.skills.list": { kind: "query", handler: async (c, args) => {
     const key = await verifyAPIKey(c, args.apiKey, SCOPES.skillsRead);
     const { role } = await callerRole(c, args.apiKey, true);
     return filterRole(listSkills(c, key.workspace, true), role, SCOPES.skillsRead);
@@ -956,7 +988,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return result;
   } },
 
-  "agent.apiKeys.list": { kind: "query", live: true, handler: async (c, args) => {
+  "agent.apiKeys.list": { kind: "query", handler: async (c, args) => {
     await requireAccess(c, args.apiKey, true, SCOPES.keysRead, "", "");
     const key = await verifyAPIKey(c, args.apiKey, SCOPES.keysRead);
     return listAPIKeys(c, key.workspace).map((row) => apiKeyRecord(row));
@@ -990,7 +1022,7 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     return deleted(count > 0);
   } },
 
-  "agent.credentials.list": { kind: "query", live: true, handler: async (c, args) => {
+  "agent.credentials.list": { kind: "query", handler: async (c, args) => {
     const key = await verifyAPIKey(c, args.apiKey, SCOPES.credentialsRead);
     const { role } = await callerRole(c, args.apiKey, true);
     return filterRole(listCredentialMeta(c, key.workspace), role, SCOPES.credentialsRead);

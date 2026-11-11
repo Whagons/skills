@@ -32,21 +32,58 @@ func TestWriteConfigRepairsExistingPermissions(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacyRuntimeOnlyRewritesFormerDefaults(t *testing.T) {
-	legacy := Config{WSURL: legacyDefaultWSURL, Project: legacyDefaultProject}
-	if !migrateLegacyRuntime(&legacy) {
-		t.Fatal("expected former Skills Vault defaults to migrate")
+func TestResolveAPIURLPrefersExplicitEndpointThenAppOrigin(t *testing.T) {
+	t.Setenv("WHAGONS_DEV_API_URL", "")
+	t.Setenv("WHAGONS_DEV_APP_URL", "")
+	t.Setenv("WHAGONS_SKILLS_API_URL", "")
+	t.Setenv("WHAGONS_SKILLS_APP_URL", "")
+	cases := []struct {
+		name   string
+		config Config
+		env    map[string]string
+		want   string
+	}{
+		{"default is the vault app origin", Config{}, nil, "https://skills.whagons.com"},
+		{"old Gonvex settings are ignored", Config{AppURL: "https://skills.whagons.com/"}, nil, "https://skills.whagons.com"},
+		{"custom app origin", Config{AppURL: "https://skills-cf-dev-vault.example.workers.dev/?x=1"}, nil, "https://skills-cf-dev-vault.example.workers.dev"},
+		{"config apiURL wins over app", Config{AppURL: "https://a.test/", APIURL: "https://b.test/"}, nil, "https://b.test"},
+		{"env wins over config", Config{APIURL: "https://b.test"}, map[string]string{"WHAGONS_DEV_API_URL": "http://127.0.0.1:8787"}, "http://127.0.0.1:8787"},
 	}
-	if legacy.WSURL != defaultWSURL || legacy.Project != defaultProject {
-		t.Fatalf("migrated runtime = %q project = %q", legacy.WSURL, legacy.Project)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			got, err := resolveAPIURL(tc.config)
+			if err != nil || got != tc.want {
+				t.Fatalf("resolveAPIURL = %q, %v; want %q", got, err, tc.want)
+			}
+		})
 	}
+	if _, err := validateAPIURL("http://vault.example.test"); err == nil {
+		t.Fatal("plain HTTP to a remote host must be refused")
+	}
+	if _, err := validateAPIURL("https://user:pass@vault.example.test"); err == nil {
+		t.Fatal("credentials in the API URL must be refused")
+	}
+}
 
-	custom := Config{WSURL: "wss://example.test/ws", Project: "personal"}
-	if migrateLegacyRuntime(&custom) {
-		t.Fatal("custom runtime must remain user-owned")
+func TestConfigFromGonvexEraLoadsAndDropsOldFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"apiKey":"k","wsURL":"wss://gonvex.whagons.com/ws","project":"01f1974b-dcda-6fc3-b16d-9acf5f3b4192"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if custom.WSURL != "wss://example.test/ws" || custom.Project != "personal" {
-		t.Fatalf("custom configuration changed: %#v", custom)
+	t.Setenv("WHAGONS_DEV_CONFIG", path)
+	config, err := readConfig()
+	if err != nil || config.APIKey != "k" {
+		t.Fatalf("config = %#v, %v", config, err)
+	}
+	if err := writeConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "gonvex") || strings.Contains(string(data), "wsURL") {
+		t.Fatalf("old runtime fields survived a rewrite: %s", data)
 	}
 }
 

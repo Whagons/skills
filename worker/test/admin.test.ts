@@ -15,7 +15,7 @@ async function fixtureBundle() {
 
 describe("admin endpoints", () => {
   it("are invisible without ADMIN_TOKEN and reject wrong tokens", async () => {
-    const response = await worker.fetch(new Request(`${ORIGIN}/admin/stats`, { headers: { Authorization: "Bearer anything" } }), { ...env, ADMIN_TOKEN: undefined } as never, createExecutionContext());
+    const response = await worker.fetch(new Request(`${ORIGIN}/admin/stats`, { headers: { Authorization: "Bearer anything" } }), { ...env, ADMIN_TOKEN: undefined } as never);
     expect(response.status).toBe(404);
     expect((await admin("stats", { token: "wrong-token-wrong-token-wrong-token" })).status).toBe(401);
     expect((await admin("import", { method: "GET" })).status).toBe(405);
@@ -110,7 +110,8 @@ describe("HTTP surface", () => {
     const page = await SELF.fetch(`${ORIGIN}/some/client/route?tab=credentials`);
     expect(page.status).toBe(200);
     const csp = page.headers.get("Content-Security-Policy") ?? "";
-    expect(csp).toContain("connect-src 'self' wss://vault.test");
+    expect(csp).toContain("connect-src 'self' http://127.0.0.1:* https://cloudflareinsights.com");
+    expect(csp).not.toMatch(/wss?:/);
     expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).not.toContain("gonvex.whagons.com");
     expect(page.headers.get("Strict-Transport-Security")).toBe("max-age=31536000");
@@ -118,14 +119,33 @@ describe("HTTP surface", () => {
     expect(page.headers.get("Referrer-Policy")).toBe("no-referrer");
   });
 
-  it("accepts only POST JSON on /api and lets agents use a bearer key", async () => {
+  it("accepts only POST JSON on /api, with credentials only in the Authorization header", async () => {
     expect((await SELF.fetch(`${ORIGIN}/api/agent.skills.list`)).status).toBe(405);
     expect((await call("agent.skills.list", {}, { Authorization: "Bearer skv_invalid" })).error).toBe("invalid api key");
+    expect((await call("agent.skills.list", {})).error).toBe("api key is required");
+    for (const body of [{ apiKey: "skv_x" }, { sessionToken: "skv_sess_x" }]) {
+      const response = await SELF.fetch(`${ORIGIN}/api/agent.skills.list`, { method: "POST", body: JSON.stringify(body) });
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as { error: string }).error).toMatch(/Authorization header/);
+    }
     const bad = await SELF.fetch(`${ORIGIN}/api/agent.skills.list`, { method: "POST", body: "{nope" });
     expect(bad.status).toBe(400);
+    expect((await SELF.fetch(`${ORIGIN}/api/agent.skills.list`, { method: "POST", body: "[]" })).status).toBe(400);
     expect((await SELF.fetch(`${ORIGIN}/api/%E0%A4%A`, { method: "POST", body: "{}" })).status).toBe(400);
     expect((await SELF.fetch(`${ORIGIN}/api/constructor`, { method: "POST", body: "{}" })).status).toBe(404);
     const big = await SELF.fetch(`${ORIGIN}/api/agent.skills.list`, { method: "POST", body: "x".repeat((3 << 20) + 10) });
     expect(big.status).toBe(413);
+    expect((await SELF.fetch(`${ORIGIN}/ws`, { headers: { Upgrade: "websocket" } })).headers.get("Content-Type")).not.toContain("json");
+  });
+
+  it("rate-limits sign-ins per client IP", async () => {
+    const attempt = (ip: string) => SELF.fetch(`${ORIGIN}/api/auth.login`, {
+      method: "POST", headers: { "CF-Connecting-IP": ip }, body: JSON.stringify({ idToken: "fake|300|stranger@fixtures.invalid" }),
+    });
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) statuses.push((await attempt("203.0.113.7")).status);
+    expect(statuses.slice(0, 10).every((status) => status === 403)).toBe(true);
+    expect(statuses.slice(10)).toEqual([429, 429]);
+    expect((await attempt("203.0.113.8")).status).toBe(403);
   });
 });

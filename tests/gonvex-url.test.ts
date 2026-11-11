@@ -20,16 +20,13 @@ test("all runtime defaults use the production Gonvex host", async () => {
     "gonvex.json",
     "nginx.conf",
     "src/backend/gonvex.tsx",
-    "cli/cmd/whagons-dev/main.go",
   ]) {
     const contents = await readFile(new URL(`../${path}`, import.meta.url), "utf8");
     assert.match(contents, new RegExp(productionRuntime.replaceAll(".", "\\.")), path);
     if (path !== "nginx.conf") {
       assert.match(contents, new RegExp(productionProject), path);
     }
-    if (path !== "cli/cmd/whagons-dev/main.go") {
-      assert.doesNotMatch(contents, /gonvex-unified-dev\.whagons\.com/, path);
-    }
+    assert.doesNotMatch(contents, /gonvex-unified-dev\.whagons\.com/, path);
   }
 });
 
@@ -41,4 +38,14 @@ test("the default build keeps the Gonvex backend; only the Worker build switches
   assert.doesNotMatch(app, /gonvex\/_generated\/react/);
   const cloudflare = await readFile(new URL("../src/backend/cloudflare.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(cloudflare, /gonvex\.whagons\.com|@gonvex\/client|_generated\/react/);
+});
+
+test("whagons-dev talks to the vault HTTP API, not Gonvex", async () => {
+  const cli = await readFile(new URL("../cli/cmd/whagons-dev/main.go", import.meta.url), "utf8");
+  assert.match(cli, /defaultAppURL\s+= "https:\/\/skills\.whagons\.com\/"/);
+  assert.match(cli, /"\/api\/"/);
+  assert.match(cli, /req\.Header\.Set\("Authorization", "Bearer "/);
+  assert.doesNotMatch(cli, /websocket|gonvex\.whagons\.com/i);
+  const gomod = await readFile(new URL("../cli/go.mod", import.meta.url), "utf8");
+  assert.doesNotMatch(gomod, /gorilla\/websocket/);
 });

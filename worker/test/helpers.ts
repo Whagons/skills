@@ -7,14 +7,18 @@ export const OWNER_EMAIL = "owner@fixtures.invalid";
 
 export type CallOutcome = { status: number; result?: any; error?: string };
 
+// Mirrors the CLI and UI: credentials go in the Authorization header, the
+// remaining arguments in the JSON body.
 export async function call(path: string, args: Record<string, unknown> = {}, headers: Record<string, string> = {}): Promise<CallOutcome> {
+  const { sessionToken, apiKey, ...body } = args;
+  const token = (path.startsWith("agent.") ? apiKey : sessionToken) ?? apiKey ?? sessionToken;
   const response = await SELF.fetch(`${ORIGIN}/api/${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify(args),
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${String(token)}` } : {}), ...headers },
+    body: JSON.stringify(body),
   });
-  const body = (await response.json()) as { result?: unknown; error?: string };
-  return { status: response.status, ...body };
+  const parsed = (await response.json()) as { result?: unknown; error?: string };
+  return { status: response.status, ...parsed };
 }
 
 export async function ok<T = any>(path: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -67,56 +71,4 @@ export async function membershipID(ownerToken: string, email: string): Promise<s
   const person = people.find((row) => row.email === email && row.status === "active");
   if (!person) throw new Error(`no active member ${email}`);
   return person.id;
-}
-
-export type Socket = {
-  ws: WebSocket;
-  next(id?: string, timeoutMs?: number): Promise<any>;
-  send(message: Record<string, unknown>): void;
-  request(message: Record<string, unknown>): Promise<any>;
-  close(): void;
-};
-
-let counter = 0;
-
-export async function socket(query = ""): Promise<Socket> {
-  const response = await SELF.fetch(`${ORIGIN}/ws${query}`, { headers: { Upgrade: "websocket" } });
-  const ws = response.webSocket;
-  if (!ws) throw new Error(`no websocket (status ${response.status})`);
-  ws.accept();
-  const queue: any[] = [];
-  const waiters: Array<{ id?: string; resolve: (value: any) => void }> = [];
-  ws.addEventListener("message", (event) => {
-    const message = JSON.parse(String(event.data));
-    const index = waiters.findIndex((waiter) => waiter.id === undefined || waiter.id === message.id);
-    if (index >= 0) waiters.splice(index, 1)[0].resolve(message);
-    else queue.push(message);
-  });
-  const next = (id?: string, timeoutMs = 2000) => {
-    const index = queue.findIndex((message) => id === undefined || message.id === id);
-    if (index >= 0) return Promise.resolve(queue.splice(index, 1)[0]);
-    return new Promise((resolve, reject) => {
-      const waiter = { id, resolve };
-      waiters.push(waiter);
-      setTimeout(() => {
-        const at = waiters.indexOf(waiter);
-        if (at >= 0) {
-          waiters.splice(at, 1);
-          reject(new Error(`timed out waiting for message ${id ?? ""}`));
-        }
-      }, timeoutMs);
-    });
-  };
-  const send = (message: Record<string, unknown>) => ws.send(JSON.stringify(message));
-  return {
-    ws,
-    next,
-    send,
-    async request(message) {
-      const id = String(message.id ?? `m${++counter}`);
-      send({ ...message, id });
-      return next(id);
-    },
-    close: () => ws.close(),
-  };
 }

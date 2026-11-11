@@ -2340,3 +2340,17 @@ html[data-theme="dark"] .freshKey code {
 .keyRow .rolePickerOption span, .keyRow .rolePickerOption strong { white-space: normal; overflow: visible; }
 .keyRow .rolePickerTrigger > span { font: inherit; color: inherit; letter-spacing: normal; }
 .keyRow .rolePickerOption > span { font: inherit; color: inherit; letter-spacing: normal; }
+
+/* Access log (owner-only credential reads) */
+.accessLogCard { margin: 24px 32px 32px; }
+.accessLogFilters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-bottom: 18px; }
+.accessLogFilters label { display: grid; gap: 6px; min-width: 180px; flex: 1 1 180px; color: var(--muted); font-size: 12px; }
+.accessLogFilters select { min-height: 40px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-raised); color: var(--ink); font: inherit; font-size: 13px; }
+.accessLogEmpty { color: var(--muted); font-size: 13px; }
+.accessLogTable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.accessLogTable th { padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-weight: 600; text-align: left; }
+.accessLogTable td { padding: 10px; border-bottom: 1px solid var(--line); color: var(--ink); overflow-wrap: anywhere; vertical-align: top; }
+.accessLogResult { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; text-transform: capitalize; }
+.accessLogResult.allowed { background: color-mix(in srgb, var(--acid) 55%, transparent); color: var(--acid-ink); }
+.accessLogResult.denied, .accessLogResult.failed { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+@media (max-width: 760px) { .accessLogCard { margin: 0 16px 20px; } .accessLogTable thead { display: none; } .accessLogTable tr { display: grid; padding: 8px 0; border-bottom: 1px solid var(--line); } .accessLogTable td { border: 0; padding: 2px 0; } }

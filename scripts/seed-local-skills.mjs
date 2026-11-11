@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
-import { GonvexClient } from "@gonvex/client";
+import { callVault } from "./vault-api.mjs";
 
 const skillRoots = (process.env.SKILLS_LOCAL_ROOTS || [
   `${process.env.HOME}/.codex/skills`,
@@ -43,22 +43,8 @@ function parseFrontmatter(content, fallbackName) {
   };
 }
 
-function devJWT() {
-  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub: "skills-seeder", email: "skills@whagons.local" })}.seed`;
-}
 
-const wsURL = new URL(process.env.VITE_GONVEX_WS_URL || "wss://gonvex.whagons.com/ws");
-wsURL.searchParams.set("project", process.env.GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192");
 
-const client = new GonvexClient(wsURL.toString(), {
-  token: devJWT(),
-  tenant: process.env.GONVEX_PROJECT_ID || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
-});
-
-const saveRef = { kind: "mutation", path: "agent.skills.upload" };
-const listRef = { kind: "query", path: "agent.skills.list" };
-const deleteRef = { kind: "mutation", path: "agent.skills.delete" };
 
 const apiKey = process.env.WHAGONS_DEV_API_KEY || process.env.WHAGONS_SKILLS_API_KEY || process.env.SKILLS_VAULT_API_KEY || "";
 if (!apiKey) {
@@ -79,22 +65,15 @@ for (const file of localSkillFiles) {
   const metadata = parseFrontmatter(content, fallbackName);
   const id = `local-${metadata.name}`;
   seededIDs.add(id);
-  await client.mutation(saveRef, {
-    apiKey,
-    id,
-    name: metadata.name,
-    summary: metadata.summary,
-    content,
-  });
+  await callVault("agent.skills.upload", { id, name: metadata.name, summary: metadata.summary, content }, apiKey);
   console.log(`seeded ${metadata.name}`);
 }
 
-const existing = await client.query(listRef, { apiKey });
+const existing = await callVault("agent.skills.list", {}, apiKey);
 for (const skill of existing) {
   if (typeof skill.id === "string" && skill.id.startsWith("local-") && !seededIDs.has(skill.id)) {
-    await client.mutation(deleteRef, { apiKey, id: skill.id });
+    await callVault("agent.skills.delete", { id: skill.id }, apiKey);
     console.log(`removed stale ${skill.name}`);
   }
 }
 
-client.close();

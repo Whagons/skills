@@ -2,11 +2,12 @@
 
 The serverless backend and host for the vault UI: one Worker, one SQLite Durable
 Object, and one R2 bucket. Design, security model, migration and cutover are in
-[`docs/cloudflare/DESIGN.md`](../docs/cloudflare/DESIGN.md).
+[`docs/cloudflare/DESIGN.md`](../docs/cloudflare/DESIGN.md); the API reference
+is [`docs/cloudflare/API.md`](../docs/cloudflare/API.md).
 
 ```
-src/index.ts      routing, security headers, JSON API, admin gate, cron backup
-src/vault.ts      Durable Object: serialized calls, WebSocket protocol, live queries, admin ops
+src/index.ts      routing, security headers, JSON API, rate limits, admin gate, cron backup
+src/vault.ts      Durable Object: serialized calls, admin ops, backups
 src/functions.ts  every vault function (ported from gonvex/*.go, same paths and errors)
 src/context.ts    sessions, API keys, roles, per-item grants
 src/crypto.ts     encv2/encv1 credential encryption (byte-compatible with Go)
@@ -22,11 +23,10 @@ npx wrangler types --env-interface CloudflareBindings
 pnpm run typecheck && pnpm test                         # tests run inside workerd
 node --test ../tools/migrate/migrate.test.mjs
 node ../tools/crosscheck/crosscheck.mjs                 # needs Go
-../tools/e2e/cli-against-worker.sh --local              # real whagons-dev against wrangler dev
+../tools/e2e/cli-against-worker.sh --local              # whagons-dev from this checkout against wrangler dev
 ```
 
-Point an existing CLI at any Worker with `WHAGONS_DEV_WS_URL=wss://<host>/ws`.
-The CLI itself needs no change.
+Point a CLI at any Worker with `WHAGONS_DEV_API_URL=https://<host>`.
 
 ## Dev deployment (`skills-cf-dev-*`, synthetic data only)
 

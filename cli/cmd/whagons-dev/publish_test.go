@@ -67,10 +67,10 @@ func TestOwnerPublishGoesLiveThroughAgentLinks(t *testing.T) {
 	vault := &fakeVault{skills: map[string]Skill{}}
 	vault.put(Skill{ID: "ws_cloud-deploy", Name: "deploy", Content: "---\nname: deploy\ndescription: Deploy the app safely.\n---\nRun the release script.\n", UpdatedAt: "1"})
 	vault.put(Skill{ID: "ws_cloud-review", Name: "review", Content: "review rules", UpdatedAt: "1"})
-	wsURL := vault.serve(t)
-	syncOnce(t, wsURL, []string{"claude"})
+	vaultURL := vault.serve(t)
+	syncOnce(t, vaultURL, []string{"claude"})
 
-	client, err := NewClient(wsURL, "test-project")
+	client, err := NewClient(vaultURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestOwnerPublishGoesLiveThroughAgentLinks(t *testing.T) {
 			t.Fatalf("reviewer prompt lacks %q", want)
 		}
 	}
-	syncOnce(t, wsURL, []string{"claude"})
+	syncOnce(t, vaultURL, []string{"claude"})
 	if got := readThroughAgent(t, home, "claude", "deploy"); !strings.Contains(got, "Check /healthz afterwards.") {
 		t.Fatalf("agents still see the old skill: %q", got)
 	}
@@ -103,8 +103,8 @@ func TestPublishGateBlocksBeforeUploading(t *testing.T) {
 	inDirWithAgentsFile(t, "")
 	useHelperReviewer(t, `{"verdict":"block","problems":["contradicts AGENTS.md: allows --admin"]}`)
 	vault := &fakeVault{skills: map[string]Skill{}}
-	wsURL := vault.serve(t)
-	client, err := NewClient(wsURL, "test-project")
+	vaultURL := vault.serve(t)
+	client, err := NewClient(vaultURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,8 +128,8 @@ func TestNonOwnerCannotChangePublishedSkill(t *testing.T) {
 	useHelperReviewer(t, `{"verdict":"publish","problems":[]}`)
 	vault := &fakeVault{skills: map[string]Skill{}}
 	vault.put(Skill{ID: "ws_cloud-deploy", Name: "deploy", Content: "original", UpdatedAt: "1"})
-	wsURL := vault.serve(t)
-	client, err := NewClient(wsURL, "test-project")
+	vaultURL := vault.serve(t)
+	client, err := NewClient(vaultURL)
 	if err != nil {
 		t.Fatal(err)
 	}

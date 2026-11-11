@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Drives the real, unmodified whagons-dev CLI against the Worker on synthetic
-# data: migrate fixtures in, then credentials, skills, managed sync, the live
-# daemon push, and logout revocation. Everything runs under a throwaway $HOME.
+# Builds whagons-dev from this checkout and drives it against the Worker's
+# HTTP API on synthetic data: migrate fixtures in, then credentials, skills,
+# managed sync, the daemon picking up a newly published skill, and logout
+# revocation. Everything runs under a throwaway $HOME.
 #
 #   tools/e2e/cli-against-worker.sh --local
 #       starts `wrangler dev` with a throwaway key and admin token
@@ -49,7 +50,6 @@ case "$mode" in
     ;;
   *) echo "usage: $0 --local | --url URL --material FILE" >&2; exit 2 ;;
 esac
-ws="${url/http/ws}/ws"
 
 step "migrate synthetic Gonvex export into $url"
 migrate transform "$work/export.json" "$work/bundle.json" --allow-plaintext
@@ -58,15 +58,15 @@ verify_out="$(migrate verify "$work/bundle.json" --url "$url")" || { echo "$veri
 echo "$verify_out"
 echo "$verify_out" | grep -q "credentials: 7/7 decrypt with the configured key; 0 need re-encryption; 0 failed" || fail "decrypt verification"
 
-step "build the unmodified whagons-dev CLI"
+step "build whagons-dev from this checkout"
 (cd "$root/cli" && go build -buildvcs=false -o "$work/whagons-dev" ./cmd/whagons-dev)
 export HOME="$work/home"; mkdir -p "$HOME"
-export WHAGONS_DEV_WS_URL="$ws"
-unset WHAGONS_DEV_API_KEY WHAGONS_SKILLS_API_KEY WHAGONS_DEV_CONFIG
+export WHAGONS_DEV_API_URL="$url"
+unset WHAGONS_DEV_API_KEY WHAGONS_SKILLS_API_KEY WHAGONS_DEV_CONFIG WHAGONS_DEV_APP_URL
 cli() { "$work/whagons-dev" "$@"; }
 owner_key="$(jq -r .apiKeys.skill_fixturekey_owner "$work/material.json")"
 
-step "auth set-key (verifies the migrated key over the WebSocket)"
+step "auth set-key (verifies the migrated key against the API)"
 printf '%s' "$owner_key" | cli auth set-key --stdin
 cli auth status
 
@@ -86,17 +86,17 @@ head -1 "$work/skill.md" | grep -q '^---$' || fail "skills get"
 cli skills update
 [ "$(find "$HOME/.whagons-dev/skills" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 11 ] || fail "managed skills not installed"
 
-step "daemon receives a live push when a skill is published"
+step "daemon picks up a newly published skill (polls every 20s)"
 cli daemon --interval 60s --no-self-update >"$work/daemon.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 1 30); do grep -q "skills are current" "$work/daemon.log" && break; sleep 0.5; done
 sleep 1
 curl -fsS -X POST "$url/api/agent.skills.upload" -H "Authorization: Bearer $owner_key" -H 'content-type: application/json' \
   -d '{"name":"e2e-live-skill","summary":"live push","content":"---\nname: e2e-live-skill\ndescription: pushed\n---\n\n# Live\n","publish":true}' >/dev/null
-for _ in $(seq 1 40); do [ -d "$HOME/.whagons-dev/skills/e2e-live-skill" ] && break; sleep 0.25; done
+for _ in $(seq 1 90); do [ -d "$HOME/.whagons-dev/skills/e2e-live-skill" ] && break; sleep 0.5; done
 [ -d "$HOME/.whagons-dev/skills/e2e-live-skill" ] || { cat "$work/daemon.log"; fail "daemon did not apply the pushed skill"; }
-grep -q "vault edit detected" "$work/daemon.log" || fail "daemon did not log the live push"
-echo "daemon applied the pushed skill"
+grep -q "vault edit detected" "$work/daemon.log" || fail "daemon did not log the change"
+echo "daemon applied the published skill"
 
 step "auth logout revokes the key server-side"
 cli auth logout

@@ -30,6 +30,7 @@ export function BackendProvider({ children }: { children: ReactNode }) {
 
 export const backendLabel = "Gonvex runtime";
 export const backendStatus = "Gonvex live";
+export const backendFeatures = { accessLog: false };
 export const backendHost = "gonvex.whagons.com";
 
 function agentExample() {

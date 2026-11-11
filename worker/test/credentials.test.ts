@@ -2,7 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { decryptSecret, encryptSecret } from "../src/crypto";
 import vectors from "./fixtures/go-vectors.json";
-import { OWNER_EMAIL, fails, login, ok } from "./helpers";
+import { OWNER_EMAIL, fails, login, membershipID, ok, team } from "./helpers";
 
 function vaultStub() {
   return env.VAULT.get(env.VAULT.idFromName("vault"));
@@ -78,5 +78,30 @@ describe("credential encryption", () => {
     expect(again.id).toBe(first.id);
     expect(await ok("credentials.list", { sessionToken })).toHaveLength(1);
     expect(await ok("credentials.delete", { sessionToken, id: first.id })).toEqual({ deleted: true });
+  });
+
+  it("lists credential reads for the owner, filterable by person, key and secret", async () => {
+    const t = await team();
+    const a = await ok("credentials.save", { sessionToken: t.owner, name: "secret-a", value: "va" });
+    const b = await ok("credentials.save", { sessionToken: t.owner, name: "secret-b", value: "vb" });
+    const limited = await ok("access.saveRole", { sessionToken: t.owner, role: { name: "Only A", scopes: ["credentials:read"], credential_ids: [a.id] } });
+    await ok("access.assignRole", { sessionToken: t.owner, id: await membershipID(t.owner, "member@fixtures.invalid"), role_id: limited.id });
+    const memberKey = await ok("apiKeys.create", { sessionToken: t.member, name: "member laptop", scopes: ["credentials:read"] });
+    await ok("agent.credentials.get", { apiKey: memberKey.apiKey, name: "secret-a" });
+    await fails("agent.credentials.get", { apiKey: memberKey.apiKey, name: "secret-b" }, /does not allow/);
+    await ok("credentials.get", { sessionToken: t.owner, id: b.id });
+
+    const all = await ok("audit.credentialReads", { sessionToken: t.owner });
+    expect(all.map((e: any) => [e.actor_email, e.credential_name, e.result, e.api_key_name])).toEqual([
+      [OWNER_EMAIL, "secret-b", "allowed", ""],
+      ["member@fixtures.invalid", "secret-b", "denied", "member laptop"],
+      ["member@fixtures.invalid", "secret-a", "allowed", "member laptop"],
+    ]);
+    expect(await ok("audit.credentialReads", { sessionToken: t.owner, actor_email: OWNER_EMAIL })).toHaveLength(1);
+    expect(await ok("audit.credentialReads", { sessionToken: t.owner, api_key_id: memberKey.record.id })).toHaveLength(2);
+    const onlyB = await ok("audit.credentialReads", { sessionToken: t.owner, credential_id: b.id });
+    expect(onlyB.map((e: any) => e.result)).toEqual(["allowed", "denied"]);
+    expect(JSON.stringify(all)).not.toMatch(/"va"|"vb"/);
+    await fails("audit.credentialReads", { sessionToken: t.member }, "only the workspace owner can read the audit log");
   });
 });

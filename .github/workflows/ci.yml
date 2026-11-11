@@ -38,6 +38,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.mod
       - name: Build
         working-directory: cli
         run: go build ./...
@@ -59,6 +60,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.mod
       - name: Install pnpm (same pin as the Dockerfile)
         run: npm install --global pnpm@11.10.0
       - name: Install web dependencies (the Worker serves the same React build)
@@ -85,5 +87,5 @@ jobs:
       - name: Bundle check (no deploy)
         working-directory: worker
         run: npx wrangler deploy --dry-run --env dev --outdir dist-worker
-      - name: Unmodified whagons-dev CLI against wrangler dev
+      - name: whagons-dev (built from this checkout) against wrangler dev
         run: tools/e2e/cli-against-worker.sh --local

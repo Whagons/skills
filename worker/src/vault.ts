@@ -1,6 +1,6 @@
 // The vault Durable Object: one instance ("vault") owns all data in SQLite,
-// serializes every call, serves the Gonvex-compatible WebSocket protocol with
-// live queries, and implements the operator (admin) operations.
+// serializes every call, and implements the operator (admin) operations. All
+// traffic arrives as RPC from the Worker (src/index.ts); there are no sockets.
 
 import { DurableObject } from "cloudflare:workers";
 // Plain JS module shared with the migration CLI (types in lib.d.mts).
@@ -13,17 +13,10 @@ import { DAY_MS, VaultError, addMs, nowISO, sha256Hex } from "./util";
 
 export type CallResult = { ok: true; result: unknown } | { ok: false; error: string; status: number };
 
-type Subscription = { id: string; path: string; args: Record<string, unknown>; h: string };
-type Attachment = { subs: Subscription[]; ip: string; ua: string };
-
-const MAX_MESSAGE_BYTES = 3 << 20;
-const MAX_SUBSCRIPTIONS = 16;
-const MAX_ATTACHMENT_BYTES = 2000;
 const AUDIT_RETENTION_DAYS = 400;
 
 export class Vault extends DurableObject<Env> {
   private chain: Promise<unknown> = Promise.resolve();
-  private refreshQueued = false;
   private readonly contentCache = new Map<string, string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -52,10 +45,10 @@ export class Vault extends DurableObject<Env> {
   async call(path: string, args: unknown, meta: Meta): Promise<CallResult> {
     const def = Object.hasOwn(FUNCTIONS, path) ? FUNCTIONS[path] : undefined;
     if (!def) return { ok: false, error: `unknown function: ${path}`, status: 404 };
-    return this.invoke(path, args, meta, def.kind === "mutation");
+    return this.invoke(path, args, meta);
   }
 
-  private async invoke(path: string, rawArgs: unknown, meta: Meta, refresh: boolean, quiet = false): Promise<CallResult> {
+  private async invoke(path: string, rawArgs: unknown, meta: Meta): Promise<CallResult> {
     const def = FUNCTIONS[path];
     const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? (rawArgs as Record<string, unknown>) : {};
     try {
@@ -65,11 +58,8 @@ export class Vault extends DurableObject<Env> {
         prepared = await def.prepare(c, args);
       }
       const result = await this.serialize(async () => {
-        const c = this.context(meta);
-        c.quiet = quiet;
-        return def.handler(c, args, prepared);
+        return def.handler(this.context(meta), args, prepared);
       });
-      if (refresh) this.queueRefresh();
       return { ok: true, result: result ?? null };
     } catch (error) {
       return failure(error);
@@ -90,7 +80,6 @@ export class Vault extends DurableObject<Env> {
           default: throw new VaultError(`unknown admin operation: ${op}`, 404);
         }
       });
-      if (op === "import" || op === "reencrypt") this.queueRefresh();
       return { ok: true, result };
     } catch (error) {
       return failure(error);
@@ -113,173 +102,6 @@ export class Vault extends DurableObject<Env> {
       this.ctx.storage.sql.exec("delete from audit_events where at < ?", addMs(now, -AUDIT_RETENTION_DAYS * DAY_MS));
     });
     await this.ctx.storage.setAlarm(Date.now() + DAY_MS);
-  }
-
-  // ---------------------------------------------------------------------
-  // WebSocket protocol (the subset of Gonvex that whagons-dev and the UI use).
-
-  async fetch(request: Request): Promise<Response> {
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("expected websocket", { status: 426 });
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    this.ctx.acceptWebSocket(server);
-    const attachment: Attachment = {
-      subs: [],
-      ip: request.headers.get("CF-Connecting-IP") ?? "",
-      ua: (request.headers.get("User-Agent") ?? "").slice(0, 80),
-    };
-    server.serializeAttachment(attachment);
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
-    const text = typeof data === "string" ? data : new TextDecoder().decode(data);
-    if (text.length > MAX_MESSAGE_BYTES) {
-      ws.close(1009, "message too large");
-      return;
-    }
-    let message: Record<string, unknown>;
-    try {
-      message = JSON.parse(text);
-    } catch {
-      ws.close(1007, "invalid JSON");
-      return;
-    }
-    const id = typeof message.id === "string" || typeof message.id === "number" ? message.id : "";
-    const path = typeof message.path === "string" ? message.path : "";
-    const attachment = (ws.deserializeAttachment() ?? { subs: [], ip: "", ua: "" }) as Attachment;
-    const meta: Meta = { ip: attachment.ip, userAgent: attachment.ua, ray: "" };
-    const send = (value: Record<string, unknown>) => {
-      try {
-        ws.send(JSON.stringify(value));
-      } catch {
-        // socket closed
-      }
-    };
-
-    switch (message.type) {
-      case "auth": {
-        const tenant = typeof message.tenant === "string" ? message.tenant : "";
-        if (tenant && tenant !== this.projectID()) send({ type: "auth.error", id, error: "unknown project" });
-        else send({ type: "auth.result", id });
-        return;
-      }
-      case "query.subscribe": {
-        const def = Object.hasOwn(FUNCTIONS, path) ? FUNCTIONS[path] : undefined;
-        if (!def || (def.kind !== "query" && def.kind !== "sync")) {
-          send({ type: "query.error", id, path, error: `unknown query: ${path}` });
-          return;
-        }
-        const args = (message.args ?? {}) as Record<string, unknown>;
-        const live = !!def.live;
-        if (live) {
-          const next = { ...attachment, subs: attachment.subs.filter((sub) => sub.id !== id) };
-          next.subs.push({ id: String(id), path, args, h: "" });
-          if (next.subs.length > MAX_SUBSCRIPTIONS || JSON.stringify(next).length > MAX_ATTACHMENT_BYTES) {
-            send({ type: "query.error", id, path, error: "too many live subscriptions on this connection" });
-            return;
-          }
-        }
-        const outcome = await this.invoke(path, args, meta, false);
-        const hash = await resultHash(outcome);
-        if (outcome.ok) send({ type: "query.result", id, path, result: outcome.result });
-        else send({ type: "query.error", id, path, error: outcome.error });
-        if (live) {
-          // Re-read: other messages may have changed the attachment meanwhile.
-          const current = (ws.deserializeAttachment() ?? attachment) as Attachment;
-          current.subs = current.subs.filter((sub) => sub.id !== String(id));
-          current.subs.push({ id: String(id), path, args, h: hash });
-          ws.serializeAttachment(current);
-        }
-        return;
-      }
-      case "query.unsubscribe": {
-        const next = { ...attachment, subs: attachment.subs.filter((sub) => sub.id !== String(id)) };
-        if (next.subs.length !== attachment.subs.length) ws.serializeAttachment(next);
-        return;
-      }
-      case "mutation.call":
-      case "action.call": {
-        const kind = message.type === "mutation.call" ? "mutation" : "action";
-        const def = Object.hasOwn(FUNCTIONS, path) ? FUNCTIONS[path] : undefined;
-        if (!def || def.kind !== kind) {
-          send({ type: `${kind}.error`, id, path, error: `unknown ${kind}: ${path}` });
-          return;
-        }
-        const outcome = await this.invoke(path, message.args, meta, kind === "mutation");
-        if (outcome.ok) send({ type: `${kind}.result`, id, path, result: outcome.result });
-        else send({ type: `${kind}.error`, id, path, error: outcome.error });
-        return;
-      }
-      case "ping":
-        send({ type: "pong", id });
-        return;
-      default:
-        return;
-    }
-  }
-
-  async webSocketClose(ws: WebSocket, code: number): Promise<void> {
-    try {
-      ws.close(code === 1005 || code === 1006 ? 1000 : code, "closing");
-    } catch {
-      // already closed
-    }
-  }
-
-  async webSocketError(): Promise<void> {}
-
-  private projectID(): string {
-    return (this.env.SKILLS_PROJECT_ID ?? "").trim() || "01f1974b-dcda-6fc3-b16d-9acf5f3b4192";
-  }
-
-  // After writes, re-run each live subscription with its own credentials (so
-  // revocations and role changes are re-authorized) and push changed results.
-  private queueRefresh(): void {
-    if (this.refreshQueued) return;
-    this.refreshQueued = true;
-    this.ctx.waitUntil(this.serialize(async () => {
-      this.refreshQueued = false;
-      await this.refresh();
-    }));
-  }
-
-  private async refresh(): Promise<void> {
-    for (const ws of this.ctx.getWebSockets()) {
-      const attachment = ws.deserializeAttachment() as Attachment | null;
-      if (!attachment?.subs?.length) continue;
-      let changed = false;
-      for (const sub of attachment.subs) {
-        const def = FUNCTIONS[sub.path];
-        if (!def?.live) continue;
-        const c = this.context({ ip: attachment.ip, userAgent: attachment.ua, ray: "" });
-        c.quiet = true;
-        let outcome: CallResult;
-        try {
-          outcome = { ok: true, result: (await def.handler(c, sub.args)) ?? null };
-        } catch (error) {
-          outcome = failure(error);
-        }
-        const hash = await resultHash(outcome);
-        if (hash === sub.h) continue;
-        sub.h = hash;
-        changed = true;
-        try {
-          ws.send(JSON.stringify(outcome.ok
-            ? { type: "query.result", id: sub.id, path: sub.path, result: outcome.result }
-            : { type: "query.error", id: sub.id, path: sub.path, error: outcome.error }));
-        } catch {
-          // socket closed
-        }
-      }
-      if (changed) {
-        try {
-          ws.serializeAttachment(attachment);
-        } catch {
-          // socket closed
-        }
-      }
-    }
   }
 
   // ---------------------------------------------------------------------
@@ -429,8 +251,4 @@ function failure(error: unknown): CallResult & { ok: false } {
   if (error instanceof VaultError) return { ok: false, error: error.message, status: error.status };
   console.error("vault internal error", error instanceof Error ? error.name : typeof error);
   return { ok: false, error: "internal error", status: 500 };
-}
-
-async function resultHash(outcome: CallResult): Promise<string> {
-  return (await sha256Hex(JSON.stringify(outcome.ok ? { r: outcome.result } : { e: outcome.error }))).slice(0, 16);
 }

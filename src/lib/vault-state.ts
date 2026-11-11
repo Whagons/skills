@@ -1,10 +1,11 @@
-export type VaultTab = "skills" | "apiKeys" | "credentials" | "team";
+export type VaultTab = "skills" | "apiKeys" | "credentials" | "team" | "accessLog";
 
 const tabQueryValue: Record<VaultTab, string> = {
   skills: "skills",
   apiKeys: "api-keys",
   credentials: "credentials",
   team: "team",
+  accessLog: "access-log",
 };
 
 const tabByQueryValue = new Map(

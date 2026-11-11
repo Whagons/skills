@@ -9,14 +9,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"encoding/json"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
-// fakeVault speaks the slice of the Gonvex WebSocket protocol the CLI uses:
-// auth, agent.skills.list and agent.skills.get.
+// fakeVault speaks the vault HTTP API the CLI uses: POST /api/<function>
+// with the API key in the Authorization header.
 type fakeVault struct {
 	mu      sync.Mutex
 	skills  map[string]Skill
@@ -62,43 +61,42 @@ func (v *fakeVault) remove(id string) {
 
 func (v *fakeVault) serve(t *testing.T) string {
 	t.Helper()
-	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		reply := func(status int, body map[string]any) {
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(body)
+		}
+		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/api/") {
+			reply(http.StatusNotFound, map[string]any{"error": "not found"})
 			return
 		}
-		defer conn.Close()
-		for {
-			var msg map[string]any
-			if err := conn.ReadJSON(&msg); err != nil {
-				return
-			}
-			id := msg["id"]
-			switch msg["type"] {
-			case "auth":
-				_ = conn.WriteJSON(map[string]any{"type": "auth.result", "id": id})
-			case "mutation.call":
-				args, _ := msg["args"].(map[string]any)
-				result, mutationErr := v.mutate(msg["path"].(string), args)
-				if mutationErr != nil {
-					_ = conn.WriteJSON(map[string]any{"type": "mutation.error", "id": id, "error": mutationErr.Error()})
-					continue
-				}
-				_ = conn.WriteJSON(map[string]any{"type": "mutation.result", "id": id, "result": result})
-			case "query.subscribe":
-				args, _ := msg["args"].(map[string]any)
-				result, queryErr := v.query(msg["path"].(string), args)
-				if queryErr != nil {
-					_ = conn.WriteJSON(map[string]any{"type": "query.error", "id": id, "error": queryErr.Error()})
-					continue
-				}
-				_ = conn.WriteJSON(map[string]any{"type": "query.result", "id": id, "result": result})
-			}
+		args := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			reply(http.StatusBadRequest, map[string]any{"error": "request body must be JSON"})
+			return
 		}
+		if _, leaked := args["apiKey"]; leaked {
+			reply(http.StatusBadRequest, map[string]any{"error": "send the API key in the Authorization header"})
+			return
+		}
+		args["apiKey"] = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		path := strings.TrimPrefix(r.URL.Path, "/api/")
+		var result any
+		var err error
+		if path == "agent.skills.upload" {
+			result, err = v.mutate(path, args)
+		} else {
+			result, err = v.query(path, args)
+		}
+		if err != nil {
+			reply(http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		reply(http.StatusOK, map[string]any{"result": result})
 	}))
 	t.Cleanup(server.Close)
-	return "ws" + strings.TrimPrefix(server.URL, "http")
+	return server.URL
 }
 
 func (v *fakeVault) query(path string, args map[string]any) (any, error) {
@@ -147,9 +145,9 @@ func forceJunctions(t *testing.T) {
 	t.Cleanup(func() { symlink = previous })
 }
 
-func syncOnce(t *testing.T, wsURL string, targets []string) SkillSyncResult {
+func syncOnce(t *testing.T, vaultURL string, targets []string) SkillSyncResult {
 	t.Helper()
-	client, err := NewClient(wsURL, "test-project")
+	client, err := NewClient(vaultURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,12 +196,12 @@ func TestManagedSkillsFollowVaultChangesThroughAgentLinks(t *testing.T) {
 			}
 			home, store := isolateHome(t)
 			vault := &fakeVault{skills: map[string]Skill{}}
-			wsURL := vault.serve(t)
+			vaultURL := vault.serve(t)
 			targets := []string{"agents", "claude"}
 
 			vault.put(Skill{ID: "ws_cloud-deploy", Name: "deploy", Content: "deploy v1", UpdatedAt: "1"})
 			vault.put(Skill{ID: "ws_cloud-review", Name: "review", Content: "review v1", UpdatedAt: "1"})
-			first := syncOnce(t, wsURL, targets)
+			first := syncOnce(t, vaultURL, targets)
 			if first.Installed != 2 {
 				t.Fatalf("installed %d skills, want 2", first.Installed)
 			}
@@ -215,7 +213,7 @@ func TestManagedSkillsFollowVaultChangesThroughAgentLinks(t *testing.T) {
 
 			// An approved edit reaches every agent through the existing link.
 			vault.put(Skill{ID: "ws_cloud-deploy", Name: "deploy", Content: "deploy v2", UpdatedAt: "2"})
-			syncOnce(t, wsURL, targets)
+			syncOnce(t, vaultURL, targets)
 			for _, target := range targets {
 				if got := readThroughAgent(t, home, target, "deploy"); got != "deploy v2" {
 					t.Fatalf("%s sees %q after update, want deploy v2", target, got)
@@ -224,7 +222,7 @@ func TestManagedSkillsFollowVaultChangesThroughAgentLinks(t *testing.T) {
 
 			// A skill removed from the vault leaves no dangling agent link.
 			vault.remove("ws_cloud-review")
-			removed := syncOnce(t, wsURL, targets)
+			removed := syncOnce(t, vaultURL, targets)
 			if strings.Join(removed.Removed, ",") != "review" {
 				t.Fatalf("removed = %v, want [review]", removed.Removed)
 			}
@@ -242,7 +240,7 @@ func TestManagedSkillsFollowVaultChangesThroughAgentLinks(t *testing.T) {
 			}
 
 			// A steady state stays quiet: no conflicts, nothing preserved.
-			syncOnce(t, wsURL, targets)
+			syncOnce(t, vaultURL, targets)
 		})
 	}
 }
@@ -383,5 +381,40 @@ func TestIsDirectoryLinkTreatsJunctionsAsLinksOnWindows(t *testing.T) {
 	}
 	if isDirectoryLink(os.ModeDir) {
 		t.Fatal("plain directory treated as a link")
+	}
+}
+
+func TestDaemonChangeCheckDetectsAPublishOverHTTP(t *testing.T) {
+	isolateHome(t)
+	vault := &fakeVault{skills: map[string]Skill{}}
+	vault.put(Skill{ID: "ws_cloud-one", Name: "one", Content: "one", UpdatedAt: "1"})
+	vaultURL := vault.serve(t)
+	t.Setenv("WHAGONS_DEV_API_URL", vaultURL)
+	t.Setenv("WHAGONS_DEV_API_KEY", "test-key")
+	previous := changePollInterval
+	changePollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { changePollInterval = previous })
+
+	revision := syncOnce(t, vaultURL, []string{"claude"}).Revision
+	changed, err := waitForSkillChange(revision, 100*time.Millisecond)
+	if err != nil || changed {
+		t.Fatalf("idle vault: changed=%v err=%v", changed, err)
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		vault.put(Skill{ID: "ws_cloud-two", Name: "two", Content: "two", UpdatedAt: "2"})
+	}()
+	changed, err = waitForSkillChange(revision, 2*time.Second)
+	if err != nil || !changed {
+		t.Fatalf("publish not detected: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestDaemonFullResyncIsASafetyNetNotEveryMinute(t *testing.T) {
+	if got := fullResyncEvery(time.Minute); got != 30*time.Minute {
+		t.Fatalf("fullResyncEvery(1m) = %v", got)
+	}
+	if got := fullResyncEvery(2 * time.Hour); got != 2*time.Hour {
+		t.Fatalf("fullResyncEvery(2h) = %v", got)
 	}
 }
