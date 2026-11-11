@@ -47,3 +47,43 @@ jobs:
       - name: Tests
         working-directory: cli
         run: go test ./...
+
+  worker:
+    name: Worker (types, workerd tests, migration, Go crypto cross-check, CLI e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - name: Install pnpm (same pin as the Dockerfile)
+        run: npm install --global pnpm@11.10.0
+      - name: Install web dependencies (the Worker serves the same React build)
+        run: pnpm install --frozen-lockfile
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: pnpm install --frozen-lockfile
+      - name: Build the UI for Workers static assets
+        working-directory: worker
+        run: pnpm run build:assets
+      - name: Generate Worker types
+        working-directory: worker
+        run: npx wrangler types --env-interface CloudflareBindings
+      - name: Typecheck (Worker and Cloudflare UI build)
+        working-directory: worker
+        run: pnpm run typecheck
+      - name: Tests in workerd
+        working-directory: worker
+        run: pnpm test
+      - name: Migration tool tests (synthetic fixtures)
+        run: node --test tools/migrate/migrate.test.mjs
+      - name: Credential crypto matches gonvex/skills.go both ways
+        run: node tools/crosscheck/crosscheck.mjs
+      - name: Bundle check (no deploy)
+        working-directory: worker
+        run: npx wrangler deploy --dry-run --env dev --outdir dist-worker
+      - name: Unmodified whagons-dev CLI against wrangler dev
+        run: tools/e2e/cli-against-worker.sh --local

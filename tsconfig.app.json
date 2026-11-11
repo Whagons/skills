@@ -16,7 +16,8 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "paths": { "@backend": ["./src/backend/gonvex.tsx"] }
   },
   "include": ["src", "gonvex/_generated"]
 }

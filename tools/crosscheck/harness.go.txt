@@ -1,0 +1,68 @@
+package main
+
+// Harness around the extracted Go credential crypto. Reads JSON on stdin:
+//   {"mode":"encrypt","key":..,"cases":[{"owner","id","value"}]}
+//   {"mode":"decrypt","key":..,"previous":..,"cases":[{"owner","id","stored"}]}
+//   {"mode":"encv1","key":..,"cases":[{"value"}]}   (legacy format, no AAD)
+// Writes the cases back with "stored" or "value"/"migrate"/"error" filled in.
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+)
+
+type vectorCase struct {
+	Owner   string `json:"owner"`
+	ID      string `json:"id"`
+	Value   string `json:"value"`
+	Stored  string `json:"stored"`
+	Migrate bool   `json:"migrate"`
+	Error   string `json:"error,omitempty"`
+}
+
+type request struct {
+	Mode     string       `json:"mode"`
+	Key      string       `json:"key"`
+	Previous string       `json:"previous"`
+	Cases    []vectorCase `json:"cases"`
+}
+
+func main() {
+	var req request
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+		panic(err)
+	}
+	keys := credentialKeyConfig{Current: req.Key, Previous: req.Previous}
+	for i := range req.Cases {
+		c := &req.Cases[i]
+		switch req.Mode {
+		case "encrypt":
+			stored, err := encryptSecret(keys, c.Owner, c.ID, c.Value)
+			if err != nil {
+				c.Error = err.Error()
+			}
+			c.Stored = stored
+		case "decrypt":
+			value, migrate, err := decryptSecret(keys, c.Owner, c.ID, c.Stored)
+			c.Value, c.Migrate = value, migrate
+			if err != nil {
+				c.Error = err.Error()
+			}
+		case "encv1":
+			item, err := newCredentialCipher(req.Key)
+			if err != nil {
+				panic(err)
+			}
+			nonce := make([]byte, item.aead.NonceSize())
+			if _, err := rand.Read(nonce); err != nil {
+				panic(err)
+			}
+			c.Stored = "encv1:" + base64.RawStdEncoding.EncodeToString(item.aead.Seal(nonce, nonce, []byte(c.Value), nil))
+		default:
+			panic("unknown mode " + req.Mode)
+		}
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(req.Cases)
+}

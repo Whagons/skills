@@ -1,7 +1,7 @@
 # Skills Vault on Cloudflare Workers: design
 
-Status: proposal, for review before cutover. Nothing in this document has been
-applied to production.
+Status: implemented in `worker/` and tested on dev resources (`skills-cf-dev-*`);
+not applied to production. The cutover (§8) is a separate, manual decision.
 
 ## 1. Why
 
@@ -195,11 +195,13 @@ that `nginx.conf` sets today: CSP, HSTS, `Referrer-Policy`, `nosniff`,
 `X-Frame-Options`, `Permissions-Policy` and COOP. CSP `connect-src` names the
 Worker's own `wss://` origin instead of `wss://gonvex.whagons.com`.
 
-The frontend's data layer is selected at build time (a Vite alias,
-`@backend`). The Docker/Coolify build keeps the Gonvex client, so merging this
-work does not change production. The Worker build uses a ~200-line client for
-the protocol in §4. `App.tsx` keeps the same `useSync` / `useMutation` /
-`query` calls.
+The frontend's data layer is selected at build time by a Vite alias,
+`@backend`. The default build, used by Docker/Coolify, resolves it to
+`src/backend/gonvex.tsx`, so merging this work does not change production.
+`vite build --mode cloudflare` resolves it to `src/backend/cloudflare.tsx`,
+a ~150-line client: one-shot calls go to the JSON API (§4.2), and owner
+collections are live queries over the WebSocket. `App.tsx` keeps the same
+`useSync` / `useMutation` / `query` calls.
 
 ## 4. API on Workers
 
@@ -251,7 +253,9 @@ compared in constant time and are **disabled when the `ADMIN_TOKEN` secret is
 unset**, which is the normal state. They exist for migration, verification,
 key rotation and rollback. None of them ever returns a plaintext secret;
 `verify-decrypt` returns counts only. `import` refuses a non-empty vault
-unless `?replace=1` is given.
+unless `?replace=1` is given. Before it returns, `import` re-encrypts any
+legacy `encv1`, plaintext or old-key rows, so they never sit unprotected in
+storage, PITR snapshots or backups. The token must be at least 32 characters.
 
 ### 4.4 Deliberate contract changes
 
@@ -378,8 +382,8 @@ credential at its source.
   up to 2 MiB are uploaded over the WebSocket today, so the limit has to be
   above that.
 * At most 16 live subscriptions per socket.
-* Optional Workers Rate Limiting binding on `auth.login` and on failed key or
-  session lookups per IP.
+* Proposed, not yet implemented (open question 6): a Workers Rate Limiting
+  binding on `auth.login` and on failed key or session lookups per IP.
 * No cookies, so there is no CSRF surface. Browser auth is a bearer token in
   `sessionStorage`, as today, and CSP forbids inline script.
 
@@ -439,8 +443,9 @@ Tool: `tools/migrate/` (Node, no dependencies).
    is one DO transaction: all or nothing.
 4. **Verify.** `migrate verify bundle.json --url …` compares per-table counts
    and SHA-256 digests of canonical rows between the bundle and
-   `/admin/stats`, then calls `/admin/verify-decrypt`, which must report every
-   credential decryptable with the configured key. Finally, smoke-test with
+   `/admin/stats`. Credential digests cover metadata only, because import
+   re-encrypts legacy rows. It then calls `/admin/verify-decrypt`, which must
+   report every credential decryptable with the configured key. Finally, smoke-test with
    the real CLI: `WHAGONS_DEV_WS_URL=wss://<worker>/ws whagons-dev
    credentials list` and `skills list`.
 
@@ -538,12 +543,38 @@ shares a production server, and its real cost is the outage coupling.
   deployed dev Worker) via `WHAGONS_DEV_WS_URL`.
 * Migration tool tests: generate fixtures → transform → import into workerd →
   verify digests → export → `to-postgres` round trip.
-* CI job `worker`: install, typecheck, workerd tests, migration tests, and a
-  Worker build. The existing `web` and `cli` jobs are unchanged.
+* `tools/crosscheck/` extracts the credential crypto from `gonvex/skills.go`
+  by Go AST, not by hand, and checks it against the Worker in both
+  directions, including rotation and `encv1`.
+* `tools/e2e/cli-against-worker.sh` runs the unmodified `whagons-dev` binary
+  against `wrangler dev` or the dev Worker under a throwaway `$HOME`:
+  migrate, `auth set-key`, `credentials list/exec/set`,
+  `skills list/get/update`, the daemon's live push, and `auth logout`
+  revocation.
+* CI job `worker` runs all of the above plus typechecks and a dry-run bundle.
+  It never deploys. The existing `web` and `cli` jobs are unchanged.
 * Dev deployment: Worker `skills-cf-dev-vault` and bucket `skills-cf-dev-blobs`,
   with a random dev key and fixture data only.
 
-## 12. Open questions for Gabriel
+## 12. Findings from building it
+
+* **Message size.** A 2,080,059-byte `SKILL.md` was uploaded by the real CLI
+  over `wss://` through Cloudflare to the dev Worker, and was stored through
+  the R2 overflow path. The 2 MiB skill contract holds on Workers.
+* **Google login on dev.** The Google OAuth client does not list the
+  `*.workers.dev` origin. On dev, the UI was therefore exercised with a
+  migrated fixture session, which is also what proves that sessions survive
+  migration. Before cutover, nothing changes in Google if the hostname stays
+  `skills.whagons.com`.
+* **Existing CSP finding (unchanged here, for parity).** Google Identity
+  Services tries to load `https://accounts.google.com/gsi/style`, which the
+  current `style-src` blocks. It only logs a console error. Adding that URL to
+  `style-src` in both `nginx.conf` and the Worker is a one-line follow-up.
+* **CLI needs no code change to work.** CLI vNext (§8 step 5) is only a default
+  and config migration, and it must not merge before cutover: the daemon's
+  self-update would move every developer to the new endpoint early.
+
+## 13. Open questions for Gabriel
 
 1. **CLI switch:** route shim on `gonvex.whagons.com/ws*` (4a) or rely on CLI
    self-update (4b)?

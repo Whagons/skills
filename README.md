@@ -2,6 +2,8 @@
 
 Gonvex + React app at https://skills.whagons.com for storing Whagons-specific agent skills and project credentials behind server-verified Google login, with a plug-and-play CLI (`whagons-dev`) for agents.
 
+> **Serverless backend in progress:** `worker/` holds a Cloudflare Workers backend for the vault (same API and CLI protocol, no Gonvex dependency). See [`docs/cloudflare/DESIGN.md`](docs/cloudflare/DESIGN.md). Production still runs on Gonvex until the cutover described there.
+
 ## Quick start for agents (plug and play)
 
 ```bash

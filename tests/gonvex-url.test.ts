@@ -19,8 +19,7 @@ test("all runtime defaults use the production Gonvex host", async () => {
     "Dockerfile",
     "gonvex.json",
     "nginx.conf",
-    "src/App.tsx",
-    "src/main.tsx",
+    "src/backend/gonvex.tsx",
     "cli/cmd/whagons-dev/main.go",
   ]) {
     const contents = await readFile(new URL(`../${path}`, import.meta.url), "utf8");
@@ -32,4 +31,14 @@ test("all runtime defaults use the production Gonvex host", async () => {
       assert.doesNotMatch(contents, /gonvex-unified-dev\.whagons\.com/, path);
     }
   }
+});
+
+test("the default build keeps the Gonvex backend; only the Worker build switches", async () => {
+  const vite = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+  assert.match(vite, /mode === "cloudflare" \? "\/src\/backend\/cloudflare\.tsx" : "\/src\/backend\/gonvex\.tsx"/);
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /from "@backend"/);
+  assert.doesNotMatch(app, /gonvex\/_generated\/react/);
+  const cloudflare = await readFile(new URL("../src/backend/cloudflare.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(cloudflare, /gonvex\.whagons\.com|@gonvex\/client|_generated\/react/);
 });
