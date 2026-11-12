@@ -482,7 +482,10 @@ skills, roles, sessions, keys, and credentials encrypted with a throwaway key
 in all three storage formats. Real production data is never used in tests,
 dev resources, logs or the repository.
 
-## 8. Cutover runbook (Gabriel runs it; nothing here is done yet)
+## 8. Cutover runbook
+
+This was the approved procedure. The completed cutover and remaining checks
+are recorded in §14.
 
 **Decision: keep it simple, with a short manual freeze.** There is no automated
 write-freeze machinery.
@@ -517,10 +520,14 @@ write-freeze machinery.
    machine updates, its old CLI keeps talking to Gonvex and fails after step 5,
    which is visible and harmless. The API key in each config keeps working,
    because key hashes were migrated.
-5. **Stop the old vault:** make the Gonvex `skills` project read-only or stop
-   it. The simplest option is removing `SKILLS_SECRET_KEY` from the project,
-   so credential reads and writes there fail closed. Leave its database
-   untouched for 30 days as the rollback source.
+5. **Stop the old vault:** revoke its active API keys and sessions, then run
+   `tools/migrate/freeze-legacy.sql` against the old Skills database with
+   `psql -v ON_ERROR_STOP=1`. Its statement triggers reject all inserts,
+   updates, deletes and truncates on the eight vault tables, including new
+   sign-ins. Verify with `tools/migrate/verify-legacy-freeze.sql`. Renaming
+   `SKILLS_SECRET_KEY` alone does not close the vault: the shared runtime
+   caches it until restart. Keep the database for 30 days as the rollback
+   source; do not restart the shared runtime to retire this one project.
 6. **Lift the freeze** and unset `ADMIN_TOKEN` on the Worker.
 
 Browser sessions and CLI keys survive, because token hashes are copied.
@@ -534,14 +541,18 @@ CLI updates.
 * **After cutover, with no writes worth keeping:**
   * Detach the custom domain and restore the original proxied DNS record for
     `skills.whagons.com` (note it before cutover).
-  * Restore `SKILLS_SECRET_KEY` on the Gonvex project, or restart it.
+  * Run `tools/migrate/unfreeze-legacy.sql`, restore the renamed
+    `SKILLS_SECRET_KEY`, and undo only the cutover token-revocation marker
+    (§14). Verify the runtime has the key before routing clients back.
   * Revert the CLI change on `main`; daemons self-update back.
-  * The old database was never modified, so it is exactly the pre-cutover
-    state.
+  * The old vault rows remain the pre-cutover snapshot apart from the
+    reversible token revocations; the write guard preserves that snapshot.
 * **After cutover, with new writes:** `migrate export --url …` pulls
   `/admin/export` (ciphertext and hashes only), and `migrate to-postgres` turns
   it into idempotent `INSERT … ON CONFLICT DO UPDATE` SQL for the Gonvex
-  tables. Gabriel reviews and applies it, then follows the step above.
+  tables. Unfreeze the old database before applying it. Gabriel reviews the
+  data reconciliation, including deletions and later token revocations,
+  then follows the step above without reactivating deliberately revoked keys.
   Because the encryption format is shared, ciphertext moves back unchanged.
 * **Data loss inside Cloudflare:** restore from DO point-in-time recovery
   (30 days) or from the nightly R2 export via `/admin/import?replace=1`.
@@ -654,21 +665,38 @@ for everything else.
    * Every active API key and session in `gonvex_01f1974b_dcda_6fc3_b16d_9acf5f3b4192` was revoked with the marker `revoked_at = '2026-11-11 11:11:11.111111+00'` (18 keys, 12 sessions). Old CLIs now get `invalid api key` from Gonvex.
    * The Gonvex project env var was renamed to `SKILLS_SECRET_KEY_DISABLED_20261111_CUTOVER`. The value is kept, and the rename takes effect on the next runtime restart.
    * The Gonvex runtime was not restarted.
+   * Follow-up: revocation alone did not prevent fresh Google sign-ins.
+     `tools/migrate/freeze-legacy.sql` was applied to the old database:
+     all eight vault tables now have statement-level write guards, so new
+     sessions and keys cannot be created. There were zero active keys and
+     sessions before the freeze. Verification rejected all 32 combinations
+     of table and write operation; the unfreeze procedure was rehearsed in
+     a transaction that was rolled back. No vault rows were changed by it.
 7. **Cleanup:** `ADMIN_TOKEN` was removed from the Worker and the `workers.dev` URL was disabled.
+
+**Still to verify:** Google sign-in with a real browser session. The CLI and
+Worker API checks do not establish that this browser flow works.
 
 **Rollback, exactly**
 
-1. Detach the custom domain. Then recreate `A skills.whagons.com 45.55.154.25`, proxied.
-2. In the old project database:
+1. Announce a write freeze. If the Worker has post-cutover writes, export
+   and reconcile them first (§9), including deletions and later revocations.
+2. In the old project database, first run
+   `tools/migrate/unfreeze-legacy.sql` with `psql -v ON_ERROR_STOP=1`, then
+   restore the cutover tokens (only when not superseded by later revocations):
    ```sql
    update skill_api_keys set revoked_at = null where revoked_at = '2026-11-11 11:11:11.111111+00';
    update skill_sessions set revoked_at = null where revoked_at = '2026-11-11 11:11:11.111111+00';
    ```
+   Apply any reconciled data while the old database is unfrozen. Do not
+   reactivate keys deliberately revoked after cutover.
 3. In the control database:
    ```sql
    update gonvex_project_env set name = 'SKILLS_SECRET_KEY'
    where name = 'SKILLS_SECRET_KEY_DISABLED_20261111_CUTOVER';
    ```
-4. Revert #12's CLI change on `main` so daemons self-update back.
-5. If the vault was written after the cutover, carry those writes back with `migrate export` and `migrate to-postgres` (§9).
+4. Verify the old runtime has its encryption key. Detach the custom domain,
+   then recreate `A skills.whagons.com 45.55.154.25`, proxied.
+5. Revert #12's CLI change on `main` so daemons self-update back. Verify
+   browser and CLI reads before lifting the write freeze.
 
