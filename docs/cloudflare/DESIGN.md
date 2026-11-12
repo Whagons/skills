@@ -1,7 +1,7 @@
 # Skills Vault on Cloudflare Workers: design
 
-Status: implemented in `worker/` and tested on dev resources (`skills-cf-dev-*`);
-not applied to production. The cutover (§8) is a separate, manual decision.
+Status: **live since 2026-11-11.** `skills.whagons.com` is served by the
+`skills-vault` Worker. See §14 for the cutover record and exact rollback state.
 
 ## 1. Why
 
@@ -634,3 +634,41 @@ for everything else.
    bucket `skills-vault-blobs`; dev uses `skills-cf-dev-vault` and
    `skills-cf-dev-blobs`. Rate limits are 600 API calls and 10 sign-ins per
    minute per IP (§5.7).
+
+## 14. Cutover record (2026-11-11)
+
+**Done**
+
+1. **Final export:** read-only, from `gonvex-postgres-v6q0sg18te1xqa5jzhdhplry` on `whagons5-restore-nyc3`, reached over SSH with the Coolify host key.
+   * Rows: 3 users, 11 sessions, 23 skills, 29 API keys, 63 credentials, 2 members, 3 invitations, 1 role.
+   * One orphan user row (empty `owner_id`) was dropped.
+   * All 63 credentials are `encv2` under key ID `d0d3e0d5c4e7`.
+2. **Production key:** `SKILLS_SECRET_KEY` was piped from the Gonvex project env into the Worker secret, without being printed or written to disk.
+3. **Import and verify** into `skills-vault` (location hint `enam`): all eight table digests match, and 63/63 credentials decrypt.
+4. **DNS:** the record `A skills.whagons.com → 45.55.154.25 (proxied)` was deleted, and `skills.whagons.com` was attached as the Worker's custom domain.
+5. **Releases:**
+   * #11 and #12 merged.
+   * `whagons-dev` self-updated on Gabriel's Linux workstation and Mac. Both sync daemons were restarted and are current.
+   * Other machines update through the daily self-update or `whagons-dev --update`.
+6. **Old vault closed,** in the old project database only:
+   * Every active API key and session in `gonvex_01f1974b_dcda_6fc3_b16d_9acf5f3b4192` was revoked with the marker `revoked_at = '2026-11-11 11:11:11.111111+00'` (18 keys, 12 sessions). Old CLIs now get `invalid api key` from Gonvex.
+   * The Gonvex project env var was renamed to `SKILLS_SECRET_KEY_DISABLED_20261111_CUTOVER`. The value is kept, and the rename takes effect on the next runtime restart.
+   * The Gonvex runtime was not restarted.
+7. **Cleanup:** `ADMIN_TOKEN` was removed from the Worker and the `workers.dev` URL was disabled.
+
+**Rollback, exactly**
+
+1. Detach the custom domain. Then recreate `A skills.whagons.com 45.55.154.25`, proxied.
+2. In the old project database:
+   ```sql
+   update skill_api_keys set revoked_at = null where revoked_at = '2026-11-11 11:11:11.111111+00';
+   update skill_sessions set revoked_at = null where revoked_at = '2026-11-11 11:11:11.111111+00';
+   ```
+3. In the control database:
+   ```sql
+   update gonvex_project_env set name = 'SKILLS_SECRET_KEY'
+   where name = 'SKILLS_SECRET_KEY_DISABLED_20261111_CUTOVER';
+   ```
+4. Revert #12's CLI change on `main` so daemons self-update back.
+5. If the vault was written after the cutover, carry those writes back with `migrate export` and `migrate to-postgres` (§9).
+
