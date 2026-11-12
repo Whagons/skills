@@ -145,6 +145,14 @@ export function transformExport(input, options = {}) {
     tables[table] = canonicalTable(table, rows);
   }
 
+  // A user row without an identity can never sign in (sessions and keys are
+  // keyed by "google:<sub>"); drop it rather than fail the migration.
+  const orphanUsers = tables.skill_users.filter((row) => !row.owner_id).length;
+  if (orphanUsers) {
+    tables.skill_users = tables.skill_users.filter((row) => row.owner_id);
+    warnings.push(`skill_users: dropped ${orphanUsers} row(s) with an empty owner_id (no identity; cannot sign in)`);
+  }
+
   // Expired sessions are useless after migration; keep live ones so browser
   // sessions survive the cutover.
   const sessionsBefore = tables.skill_sessions.length;

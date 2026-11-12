@@ -50,6 +50,16 @@ test("transform catches integrity problems", async () => {
   assert.ok(report.problems.some((p) => p.includes("missing role")));
 });
 
+test("user rows without an identity are dropped with a warning", async () => {
+  const fixture = await generateGonvexExport();
+  const doc = structuredClone(fixture.exportDoc);
+  doc.tables.skill_users.push({ owner_id: "", email: "", name: "", can_own: false, created_at: "2026-07-01T00:39:08.954704+00:00", updated_at: "2026-07-01T00:39:08.954704+00:00" });
+  const { bundle, report } = transformExport(doc, { allowPlaintext: true });
+  assert.deepEqual(report.problems, []);
+  assert.equal(bundle.tables.skill_users.length, 2);
+  assert.ok(report.warnings.some((w) => w.includes("empty owner_id")));
+});
+
 test("psql output with command tags parses; rollback SQL upserts every row", async () => {
   const fixture = await generateGonvexExport();
   const parsed = parseExportText(`BEGIN\n${JSON.stringify(fixture.exportDoc)}\nCOMMIT\n`);
