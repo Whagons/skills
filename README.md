@@ -2,6 +2,8 @@
 
 Gonvex + React app at https://skills.whagons.com for storing Whagons-specific agent skills and project credentials behind server-verified Google login, with a plug-and-play CLI (`whagons-dev`) for agents.
 
+> **Serverless backend in progress:** `worker/` holds a Cloudflare Workers backend for the vault (same functions over a plain HTTP API, no Gonvex dependency), and `whagons-dev` in this branch talks to it. See [`docs/cloudflare/DESIGN.md`](docs/cloudflare/DESIGN.md) and [`docs/cloudflare/API.md`](docs/cloudflare/API.md). Production still runs on Gonvex until the cutover runbook in the design is carried out.
+
 ## Quick start for agents (plug and play)
 
 ```bash
@@ -239,11 +241,11 @@ Supported targets:
 
 ### Background synchronization and CLI updates
 
-`setup` registers a per-user service through systemd on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows. The daemon subscribes to vault skill metadata so approved edits and deletions are applied promptly; the configured interval (one minute by default) is also a reconnect/fallback window. It does not expose credentials or run as root.
+`setup` registers a per-user service through systemd on Linux, a LaunchAgent on macOS, or Task Scheduler on Windows. The daemon checks vault skill metadata every 20 seconds and syncs when it changes, so approved edits and deletions arrive within about 20 seconds; it re-downloads everything at least every 30 minutes as a safety net. It does not expose credentials or run as root.
 
 The daemon checks once per day for a new CLI and runs the same safe updater exposed as `whagons-dev --update`. The current updater uses the official Go module, so Go must remain installed and available on `PATH`. Disable background registration with `setup --no-startup`, disable automatic CLI updates with `setup --no-auto-update`, or remove the service with `startup remove`.
 
-Environment overrides: `WHAGONS_DEV_API_KEY`, `WHAGONS_DEV_WS_URL`, `WHAGONS_DEV_PROJECT`, `WHAGONS_DEV_APP_URL`, `WHAGONS_DEV_CONFIG`, `WHAGONS_DEV_SKILLS_DIR` (the legacy `WHAGONS_SKILLS_*` names still work). Config from the old `whagons-skills` CLI at `~/.whagons-skills/config.json` is read automatically if the new path does not exist.
+Environment overrides: `WHAGONS_DEV_API_KEY`, `WHAGONS_DEV_API_URL` (vault API endpoint; defaults to the app URL's origin), `WHAGONS_DEV_APP_URL`, `WHAGONS_DEV_CONFIG`, `WHAGONS_DEV_SKILLS_DIR` (the legacy `WHAGONS_SKILLS_*` names still work). The CLI calls `POST <api>/api/<function>` with the API key in the `Authorization` header. Config from the old `whagons-skills` CLI at `~/.whagons-skills/config.json` is read automatically if the new path does not exist.
 
 ## Agent bootstrap
 

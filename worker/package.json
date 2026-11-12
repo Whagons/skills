@@ -1,0 +1,20 @@
+{
+  "name": "skills-vault-worker",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.10.0",
+  "scripts": {
+    "build:assets": "cd .. && npx vite build --mode cloudflare --outDir worker/dist-assets --emptyOutDir",
+    "typecheck": "tsc -p tsconfig.json --noEmit && cd .. && npx tsc -p tsconfig.cloudflare.json --noEmit",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy:dev": "wrangler deploy --env dev"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.8",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.5",
+    "wrangler": "4.153.0"
+  }
+}

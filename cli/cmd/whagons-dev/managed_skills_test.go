@@ -124,8 +124,8 @@ func TestBrowserAuthorizationPreservesManagedSkillConfiguration(t *testing.T) {
 		LastSelfUpdate:      "2026-08-13T00:00:00Z",
 		GoBinary:            "/usr/local/go/bin/go",
 	}
-	updated := configWithAuthorization(existing, "skv_new", "https://skills.whagons.com/", "wss://example.test/ws", "skills")
-	if updated.APIKey != "skv_new" || updated.AppURL != "https://skills.whagons.com/" || updated.WSURL != "wss://example.test/ws" || updated.Project != "skills" {
+	updated := configWithAuthorization(existing, "skv_new", "https://skills.whagons.com/", "https://vault.example.test")
+	if updated.APIKey != "skv_new" || updated.AppURL != "https://skills.whagons.com/" || updated.APIURL != "https://vault.example.test" {
 		t.Fatalf("authorization fields were not updated: %#v", updated)
 	}
 	if updated.ManagementKey != existing.ManagementKey || strings.Join(updated.SkillTargets, ",") != "agents,claude" || updated.SyncIntervalSeconds != 60 || !updated.AutoSelfUpdate || updated.LastSelfUpdate != existing.LastSelfUpdate || updated.GoBinary != existing.GoBinary {

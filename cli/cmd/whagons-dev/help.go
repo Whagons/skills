@@ -238,7 +238,8 @@ var helpPages = map[string]string{
       [--no-auto-update]
 
 Authenticates, installs approved skills, remembers targets, and normally starts
-background sync. The default interval is 1m; the minimum is 15s.
+background sync. Skill changes are picked up within about 20s; --interval
+only lengthens the full resync, which runs at least every 30m.
 `,
 	"update": `UPDATE
 
@@ -252,7 +253,9 @@ Installs the latest official Go module and replaces this CLI. Go is required.
 
   whagons-dev daemon [--interval DURATION] [--once] [--no-self-update]
 
-Syncs immediately, watches live vault changes, and reconnects at the interval.
+Syncs immediately, checks skill metadata every 20 seconds and syncs when it
+changes, and re-downloads everything at least every 30 minutes (or --interval
+if longer).
 `,
 	"targets": `TARGETS
 
@@ -270,9 +273,8 @@ user-owned skill directories.
 	"environment": `ENVIRONMENT
 
   WHAGONS_DEV_API_KEY     Process API key
-  WHAGONS_DEV_WS_URL      Gonvex WebSocket URL
-  WHAGONS_DEV_PROJECT     Gonvex project
-  WHAGONS_DEV_APP_URL     Browser app URL
+  WHAGONS_DEV_API_URL     Vault API endpoint (default: the app URL's origin)
+  WHAGONS_DEV_APP_URL     Browser app URL (default https://skills.whagons.com/)
   WHAGONS_DEV_CONFIG      Alternate config file
   WHAGONS_DEV_SKILLS_DIR  Alternate managed-skill directory
 

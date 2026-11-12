@@ -11,6 +11,7 @@ import {
   Eye,
   EyeOff,
   Fingerprint,
+  History,
   KeyRound,
   LibraryBig,
   Link2,
@@ -29,8 +30,7 @@ import {
   Vault,
   X,
 } from "lucide-react";
-import { api } from "../gonvex/_generated/api";
-import { useConvex, useMutation, useSync } from "../gonvex/_generated/react";
+import { api, backendFeatures, backendHost, backendLabel, backendStatus, scriptAPIGuide, useConvex, useMutation, useSync } from "@backend";
 import { Avatar, AvatarFallback } from "./components/ui/avatar";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -40,6 +40,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip
 import { getAuthErrorMessage } from "./lib/auth-error";
 import { RolePicker } from "./components/RolePicker";
 import { AccessRoles } from "./components/AccessRoles";
+import { AccessLog } from "./components/AccessLog";
 import { accessAPI, canAccess, resourceSummary, type AccessState } from "./lib/access";
 import { dedupeCredentials } from "./lib/credentials";
 import { invitationInstructions } from "./lib/invitations";
@@ -239,8 +240,6 @@ function readPreferredTheme(): ColorTheme {
 function isInvalidSessionError(error: unknown) {
   return error instanceof Error && /invalid session|session token is required/i.test(error.message);
 }
-const gonvexWSURL = import.meta.env.VITE_GONVEX_WS_URL ?? "wss://gonvex.whagons.com/ws";
-const gonvexProjectID = import.meta.env.VITE_GONVEX_PROJECT_ID ?? "01f1974b-dcda-6fc3-b16d-9acf5f3b4192";
 const googleClientID = import.meta.env.VITE_GOOGLE_CLIENT_ID
   ?? "578623964983-iall0oeq2r2mke7trpqqv3pjingqljh0.apps.googleusercontent.com";
 
@@ -307,57 +306,6 @@ function parseLoopbackCallback(rawCallback: string): URL | null {
   }
 }
 
-function agentExample() {
-  return `import { GonvexClient } from "@gonvex/client";
-
-const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-const token = \`\${encode({ alg: "none", typ: "JWT" })}.\${encode({
-  sub: "agent",
-  email: "agent@whagons.local",
-})}.agent\`;
-
-const client = new GonvexClient("wss://gonvex.whagons.com/ws?project=01f1974b-dcda-6fc3-b16d-9acf5f3b4192", {
-  token,
-  tenant: "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
-});
-
-const apiKey = process.env.WHAGONS_DEV_API_KEY;
-if (!apiKey) throw new Error("WHAGONS_DEV_API_KEY is required");
-
-const skills = await client.query(
-  { kind: "query", path: "agent.skills.list" },
-  { apiKey }
-);
-
-await client.mutation(
-  { kind: "mutation", path: "agent.skills.upload" },
-  {
-    apiKey,
-    id: "local-my-skill",
-    name: "my-skill",
-    summary: "Short trigger description",
-    content: skillMarkdown,
-  }
-);
-
-const skill = await client.query(
-  { kind: "query", path: "agent.skills.get" },
-  { apiKey, name: "whagons-monitor" }
-);
-
-const credentials = await client.query(
-  { kind: "query", path: "agent.credentials.list" },
-  { apiKey }
-);
-
-const credential = await client.query(
-  { kind: "query", path: "agent.credentials.get" },
-  { apiKey, name: "coolify-whagons" }
-);
-
-client.close();`;
-}
-
 function agentSetupInstructions() {
   return `Whagons Skills Vault — agent setup (plug and play)
 
@@ -403,11 +351,7 @@ whagons-dev skills install --targets all
 whagons-dev startup status
 whagons-dev auth status
 
-Direct Gonvex API path for custom scripts:
-1. npm install @gonvex/client
-2. Runtime: ${gonvexWSURL}  ·  project/tenant: ${gonvexProjectID}
-3. Call agent endpoints with the API key:
-${agentExample()}
+${scriptAPIGuide()}
 
 Security rules:
 - Use credentials exec for commands that need secrets.
@@ -523,6 +467,7 @@ export default function App() {
   const acceptInvitation = useMutation(api.team.invitations.accept);
   const rejectInvitation = useMutation(api.team.invitations.reject);
   const isWorkspaceOwner = me?.is_owner ?? false;
+  const showAccessLog = backendFeatures.accessLog && isWorkspaceOwner;
   const allowed = (scope: string, id = "") => isWorkspaceOwner || canAccess(accessState?.role, scope, id);
   const permittedKeyScopes = isWorkspaceOwner ? cliScopes : accessState?.role.scopes ?? [];
   const saveRole = useMutation(accessAPI.saveRole);
@@ -1027,8 +972,8 @@ export default function App() {
           </div>
 
           <div className="authStoryFooter">
-            <span><i className="statusDot" /> Gonvex runtime</span>
-            <span>gonvex.whagons.com</span>
+            <span><i className="statusDot" /> {backendLabel}</span>
+            <span>{backendHost}</span>
           </div>
         </section>
 
@@ -1161,6 +1106,13 @@ export default function App() {
             <span>Team</span>
             <small>{teamMembers.length.toString().padStart(2, "0")}</small>
           </button>
+          {showAccessLog ? (
+            <button className={activeTab === "accessLog" ? "tabButton active" : "tabButton"} type="button" onClick={() => changeVaultTab("accessLog")}>
+              <span className="tabIcon"><History size={17} /></span>
+              <span>Access log</span>
+              <small />
+            </button>
+          ) : null}
         </div>
 
         {activeTab === "skills" ? (
@@ -1209,16 +1161,18 @@ export default function App() {
         ) : (
           <div className="sidebarHint">
             <div className="sidebarHintIcon">
-              {activeTab === "apiKeys" ? <Fingerprint size={20} /> : activeTab === "credentials" ? <Vault size={20} /> : <Users size={20} />}
+              {activeTab === "apiKeys" ? <Fingerprint size={20} /> : activeTab === "credentials" ? <Vault size={20} /> : activeTab === "accessLog" ? <History size={20} /> : <Users size={20} />}
             </div>
             <strong>
               {activeTab === "apiKeys" ? `${activeAPIKeys.length} active keys`
                 : activeTab === "credentials" ? `${credentials.length} credentials`
+                : activeTab === "accessLog" ? "Credential reads"
                 : `${activeTeamMembers.length} active · ${pendingTeamMembers.length} pending`}
             </strong>
             <span>
               {activeTab === "apiKeys" ? "Create and revoke agent access."
                 : activeTab === "credentials" ? "Store secrets for CLI and agents."
+                : activeTab === "accessLog" ? "Who read which secret, and when."
                 : "Share this workspace with teammates."}
             </span>
           </div>
@@ -1247,7 +1201,7 @@ export default function App() {
         <div className="workspaceBar">
           <span className="workspaceName"><ShieldCheck size={14} /> Private workspace</span>
           <div className="workspaceControls">
-            <span className="runtimeStatus"><i className="statusDot" /> Gonvex live</span>
+            <span className="runtimeStatus"><i className="statusDot" /> {backendStatus}</span>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1659,6 +1613,15 @@ export default function App() {
               </Card>
             </div>
           </>
+        ) : null}
+
+        {activeTab === "accessLog" && showAccessLog ? (
+          <AccessLog
+            sessionToken={sessionToken}
+            people={[...new Set([me?.email ?? "", ...activeTeamMembers.map((member) => member.email)].filter(Boolean))]}
+            keys={apiKeys.map((key) => ({ id: key.id, label: `${key.name} (${key.prefix}…)` }))}
+            secrets={credentials.map((credential) => ({ id: credential.id, label: credential.name }))}
+          />
         ) : null}
 
         {activeTab === "team" ? (

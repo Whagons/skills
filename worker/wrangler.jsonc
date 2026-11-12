@@ -1,0 +1,67 @@
+// Skills Vault on Cloudflare Workers. See docs/cloudflare/DESIGN.md.
+//
+// The top level is the production Worker ("skills-vault"). It is NOT deployed
+// by CI or by any script in this repo; the cutover is a manual decision
+// (DESIGN.md §8). Development uses `--env dev` (skills-cf-dev-*) only.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skills-vault",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist-assets",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "VAULT", "class_name": "Vault" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Vault"] }],
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "skills-vault-blobs" }],
+  "triggers": { "crons": ["17 3 * * *"] },
+  "observability": { "enabled": true },
+  "vars": {
+    "SKILLS_PROJECT_ID": "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
+    // The vault Durable Object is created in eastern North America.
+    "VAULT_LOCATION_HINT": "enam"
+  },
+  // Per-IP limits (DESIGN.md §5.7): all API calls, and Google sign-ins.
+  "ratelimits": [
+    { "name": "API_LIMIT", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
+    { "name": "LOGIN_LIMIT", "namespace_id": "4102", "simple": { "limit": 10, "period": 60 } }
+  ],
+  // Secrets (wrangler secret put): SKILLS_SECRET_KEY, optional
+  // SKILLS_SECRET_KEY_PREVIOUS, SKILLS_ALLOWED_EMAILS, SKILLS_ALLOWED_DOMAINS,
+  // SKILLS_GOOGLE_CLIENT_ID, and ADMIN_TOKEN only while migrating. The
+  // allowlist is a secret so people's addresses stay out of the repository;
+  // unset, it falls back to the built-in owner exactly like the Go backend.
+  // Staging runs on workers.dev; at the flip add
+  //   "routes": [{ "pattern": "skills.whagons.com", "custom_domain": true }]
+  // and set "workers_dev": false.
+
+  "env": {
+    "dev": {
+      "name": "skills-cf-dev-vault",
+      "workers_dev": true,
+      "durable_objects": {
+        "bindings": [{ "name": "VAULT", "class_name": "Vault" }]
+      },
+      "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "skills-cf-dev-blobs" }],
+      "triggers": { "crons": ["17 3 * * *"] },
+      "ratelimits": [
+        { "name": "API_LIMIT", "namespace_id": "4111", "simple": { "limit": 600, "period": 60 } },
+        { "name": "LOGIN_LIMIT", "namespace_id": "4112", "simple": { "limit": 10, "period": 60 } }
+      ],
+      "vars": {
+        "SKILLS_PROJECT_ID": "01f1974b-dcda-6fc3-b16d-9acf5f3b4192",
+        "VAULT_LOCATION_HINT": "enam",
+        // Fixture-only owner; real Google accounts never own the dev vault.
+        "SKILLS_ALLOWED_EMAILS": "owner@fixtures.invalid",
+        "SKILLS_ALLOWED_DOMAINS": ""
+      }
+    }
+  }
+}

@@ -9,6 +9,19 @@ import (
 
 const defaultSyncInterval = time.Minute
 
+// minFullResync bounds how often the daemon re-downloads every skill when
+// nothing changed. Changes themselves are picked up by the 20-second metadata
+// check, so the full resync is only a safety net (for example, to repair a
+// locally edited managed skill).
+const minFullResync = 30 * time.Minute
+
+func fullResyncEvery(interval time.Duration) time.Duration {
+	if interval > minFullResync {
+		return interval
+	}
+	return minFullResync
+}
+
 func runDaemon(args []string) error {
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	intervalFlag := fs.Duration("interval", 0, "vault sync interval")
@@ -54,9 +67,9 @@ func runDaemon(args []string) error {
 			return nil
 		}
 		if err == nil {
-			changed, watchErr := waitForSkillChange(revision, interval)
+			changed, watchErr := waitForSkillChange(revision, fullResyncEvery(interval))
 			if watchErr != nil {
-				fmt.Printf("%s live watch reconnecting: %v\n", time.Now().Format(time.RFC3339), watchErr)
+				fmt.Printf("%s change check failed, retrying: %v\n", time.Now().Format(time.RFC3339), watchErr)
 				time.Sleep(15 * time.Second)
 			} else if changed {
 				fmt.Printf("%s vault edit detected\n", time.Now().Format(time.RFC3339))
@@ -80,9 +93,7 @@ func syncConfiguredOnce() (string, error) {
 	if len(targets) == 0 {
 		targets = []string{"agents"}
 	}
-	wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
-	project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
-	client, err := NewClient(wsURLWithProject(wsURL, project), project)
+	client, err := clientForConfig(config)
 	if err != nil {
 		return "", err
 	}
@@ -97,50 +108,40 @@ func syncConfiguredOnce() (string, error) {
 	return result.Revision, nil
 }
 
+// changePollInterval is how often the daemon checks skill metadata between
+// full syncs. A metadata list is one small HTTP request, so edits arrive
+// within ~20 seconds without holding a connection open.
+var changePollInterval = 20 * time.Second
+
+// waitForSkillChange polls the published skill list until its revision differs
+// from currentRevision or timeout passes.
 func waitForSkillChange(currentRevision string, timeout time.Duration) (bool, error) {
 	config, err := readConfig()
 	if err != nil {
 		return false, err
 	}
 	apiKey := firstNonEmpty(envValue("API_KEY"), config.APIKey)
-	wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
-	project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
-	client, err := NewClient(wsURLWithProject(wsURL, project), project)
+	client, err := clientForConfig(config)
 	if err != nil {
 		return false, err
 	}
 	defer client.Close()
-	id := randomID()
-	if err := client.write(message{"type": "query.subscribe", "id": id, "path": "agent.skills.list", "args": map[string]any{"apiKey": apiKey}}); err != nil {
-		return false, err
-	}
-	defer client.write(message{"type": "query.unsubscribe", "id": id})
 	deadline := time.Now().Add(timeout)
 	for {
-		if err := client.conn.SetReadDeadline(deadline); err != nil {
+		wait := changePollInterval
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		if wait <= 0 {
+			return false, nil
+		}
+		time.Sleep(wait)
+		var skills []Skill
+		if err := client.Query("agent.skills.list", map[string]any{"apiKey": apiKey}, &skills); err != nil {
 			return false, err
 		}
-		var msg message
-		if err := client.conn.ReadJSON(&msg); err != nil {
-			if time.Now().After(deadline) {
-				return false, nil
-			}
-			return false, err
-		}
-		if msg["id"] != id {
-			continue
-		}
-		switch msg["type"] {
-		case "query.error":
-			return false, fmt.Errorf("%v", msg["error"])
-		case "query.result":
-			var skills []Skill
-			if err := decodeResult(msg["result"], &skills); err != nil {
-				return false, err
-			}
-			if skillMetadataRevision(skills) != currentRevision {
-				return true, nil
-			}
+		if skillMetadataRevision(skills) != currentRevision {
+			return true, nil
 		}
 	}
 }

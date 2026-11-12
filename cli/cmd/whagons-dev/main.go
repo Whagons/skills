@@ -23,23 +23,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
 )
 
 const (
-	defaultWSURL            = "wss://gonvex.whagons.com/ws"
-	defaultProject          = "01f1974b-dcda-6fc3-b16d-9acf5f3b4192"
 	defaultAppURL           = "https://skills.whagons.com/"
-	legacyDefaultWSURL      = "wss://gonvex-unified-dev.whagons.com/ws"
-	legacyDefaultProject    = "skills"
 	maxSkillBytes           = 2 << 20
 	maxCredentialInputBytes = 256 << 10
 )
 
 type Config struct {
 	APIKey              string   `json:"apiKey,omitempty"`
-	WSURL               string   `json:"wsURL,omitempty"`
-	Project             string   `json:"project,omitempty"`
+	// APIURL overrides the vault API endpoint. When empty the API is served
+	// from the vault app's origin (AppURL, default https://skills.whagons.com).
+	APIURL              string   `json:"apiURL,omitempty"`
 	AppURL              string   `json:"appURL,omitempty"`
 	ManagementKey       string   `json:"managementKey,omitempty"`
 	SkillTargets        []string `json:"skillTargets,omitempty"`
@@ -49,11 +45,10 @@ type Config struct {
 	GoBinary            string   `json:"goBinary,omitempty"`
 }
 
-func configWithAuthorization(config Config, apiKey, appURL, wsURL, project string) Config {
+func configWithAuthorization(config Config, apiKey, appURL, apiURL string) Config {
 	config.APIKey = apiKey
 	config.AppURL = appURL
-	config.WSURL = wsURL
-	config.Project = project
+	config.APIURL = apiURL
 	return config
 }
 
@@ -103,10 +98,11 @@ type credentialExecOptions struct {
 	InheritEnv []string
 }
 
-type message map[string]any
-
+// Client calls the vault's HTTP API: POST <api>/api/<function> with the
+// arguments as JSON and the API key in the Authorization header.
 type Client struct {
-	conn *websocket.Conn
+	base string
+	http *http.Client
 }
 
 func main() {
@@ -191,8 +187,11 @@ func runAuth(command string, args []string) error {
 		if len(prefix) > 14 {
 			prefix = prefix[:14]
 		}
-		project := firstNonEmpty(config.Project, defaultProject)
-		fmt.Printf("Logged in (project %s, key %s...)\n", project, prefix)
+		apiURL, err := resolveAPIURL(config)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Logged in (vault %s, key %s...)\n", apiURL, prefix)
 		return nil
 	case "set-key":
 		// Persists a key minted by a human in the vault UI. Agents cannot mint
@@ -215,9 +214,11 @@ func runAuth(command string, args []string) error {
 			return errors.New("no API key received on stdin")
 		}
 		config, _ := readConfig()
-		wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
-		project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
-		client, err := NewClient(wsURLWithProject(wsURL, project), project)
+		apiURL, err := resolveAPIURL(config)
+		if err != nil {
+			return err
+		}
+		client, err := NewClient(apiURL)
 		if err != nil {
 			return err
 		}
@@ -227,8 +228,6 @@ func runAuth(command string, args []string) error {
 			return fmt.Errorf("the vault rejected this API key: %v", err)
 		}
 		config.APIKey = apiKey
-		config.WSURL = wsURL
-		config.Project = project
 		config.AppURL = firstNonEmpty(config.AppURL, defaultAppURL)
 		if err := writeConfig(config); err != nil {
 			return err
@@ -244,9 +243,7 @@ func runAuth(command string, args []string) error {
 		config, _ := readConfig()
 		apiKey := firstNonEmpty(envValue("API_KEY"), config.APIKey)
 		if !*localOnly && apiKey != "" {
-			wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
-			project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
-			client, err := NewClient(wsURLWithProject(wsURL, project), project)
+			client, err := clientForConfig(config)
 			if err != nil {
 				return fmt.Errorf("could not revoke the server key; local authentication was preserved: %w (use --local-only to clear it anyway)", err)
 			}
@@ -602,9 +599,7 @@ func withClient(fn func(*Client, string, Config) error) error {
 			return errors.New("not logged in. Run: whagons-dev auth login")
 		}
 	}
-	wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
-	project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
-	client, err := NewClient(wsURLWithProject(wsURL, project), project)
+	client, err := clientForConfig(config)
 	if err != nil {
 		return err
 	}
@@ -612,106 +607,96 @@ func withClient(fn func(*Client, string, Config) error) error {
 	return fn(client, apiKey, config)
 }
 
-func NewClient(wsURL, tenant string) (*Client, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+// resolveAPIURL picks the vault API endpoint: WHAGONS_DEV_API_URL, then the
+// config's apiURL, then the origin of the vault app URL (WHAGONS_DEV_APP_URL,
+// config appURL, or https://skills.whagons.com).
+func resolveAPIURL(config Config) (string, error) {
+	raw := firstNonEmpty(envValue("API_URL"), config.APIURL)
+	if raw == "" {
+		_, origin, err := validateAppURL(firstNonEmpty(envValue("APP_URL"), config.AppURL, defaultAppURL))
+		if err != nil {
+			return "", err
+		}
+		return origin, nil
+	}
+	return validateAPIURL(raw)
+}
+
+func clientForConfig(config Config) (*Client, error) {
+	apiURL, err := resolveAPIURL(config)
 	if err != nil {
 		return nil, err
 	}
-	client := &Client{conn: conn}
-	if tenant != "" {
-		id := randomID()
-		if err := client.write(message{"type": "auth", "id": id, "token": devJWT(), "tenant": tenant}); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		for {
-			msg, err := client.read()
-			if err != nil {
-				conn.Close()
-				return nil, err
-			}
-			if msg["id"] != id {
-				continue
-			}
-			switch msg["type"] {
-			case "auth.result":
-				return client, nil
-			case "auth.error":
-				conn.Close()
-				return nil, fmt.Errorf("gonvex auth failed: %v", msg["error"])
-			}
-		}
-	}
-	return client, nil
+	return NewClient(apiURL)
 }
 
-func (c *Client) Close() {
-	_ = c.conn.Close()
-}
-
-func (c *Client) Query(path string, args any, out any) error {
-	id := randomID()
-	if err := c.write(message{"type": "query.subscribe", "id": id, "path": path, "args": args}); err != nil {
-		return err
-	}
-	defer c.write(message{"type": "query.unsubscribe", "id": id})
-	for {
-		msg, err := c.read()
-		if err != nil {
-			return err
-		}
-		if msg["id"] != id {
-			continue
-		}
-		switch msg["type"] {
-		case "query.result":
-			return decodeResult(msg["result"], out)
-		case "query.error":
-			return fmt.Errorf("%v", msg["error"])
-		}
-	}
-}
-
-func (c *Client) Mutation(path string, args any, out any) error {
-	id := randomID()
-	if err := c.write(message{"type": "mutation.call", "id": id, "path": path, "args": args, "trace": map[string]any{"clientSentAtMs": time.Now().UnixMilli()}}); err != nil {
-		return err
-	}
-	for {
-		msg, err := c.read()
-		if err != nil {
-			return err
-		}
-		if msg["id"] != id {
-			continue
-		}
-		switch msg["type"] {
-		case "mutation.result":
-			return decodeResult(msg["result"], out)
-		case "mutation.error":
-			return fmt.Errorf("%v", msg["error"])
-		}
-	}
-}
-
-func (c *Client) write(value any) error {
-	if err := c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return err
-	}
-	return c.conn.WriteJSON(value)
-}
-
-func (c *Client) read() (message, error) {
-	if err := c.conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+func NewClient(apiURL string) (*Client, error) {
+	base, err := validateAPIURL(apiURL)
+	if err != nil {
 		return nil, err
 	}
-	var msg message
-	if err := c.conn.ReadJSON(&msg); err != nil {
-		return nil, err
+	return &Client{base: base, http: &http.Client{Timeout: 60 * time.Second}}, nil
+}
+
+func (c *Client) Close() {}
+
+// Query and Mutation are the same HTTP call; the split mirrors the vault's
+// function kinds and keeps call sites readable.
+func (c *Client) Query(path string, args map[string]any, out any) error {
+	return c.call(path, args, out)
+}
+
+func (c *Client) Mutation(path string, args map[string]any, out any) error {
+	return c.call(path, args, out)
+}
+
+// call moves "apiKey" from the arguments into the Authorization header so the
+// key never appears in a request body.
+func (c *Client) call(path string, args map[string]any, out any) error {
+	body := map[string]any{}
+	apiKey := ""
+	for key, value := range args {
+		if key == "apiKey" {
+			apiKey, _ = value.(string)
+			continue
+		}
+		body[key] = value
 	}
-	return msg, nil
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.base+"/api/"+url.PathEscape(path), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "whagons-dev/"+cliVersion)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *string         `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&envelope); err != nil {
+		return fmt.Errorf("vault returned HTTP %d without a JSON body", resp.StatusCode)
+	}
+	if envelope.Error != nil {
+		return errors.New(*envelope.Error)
+	}
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("vault returned HTTP %d", resp.StatusCode)
+	}
+	if out == nil || len(envelope.Result) == 0 {
+		return nil
+	}
+	return json.Unmarshal(envelope.Result, out)
 }
 
 func decodeResult(value any, out any) error {
@@ -737,11 +722,12 @@ func browserLogin(appURL string) error {
 	if err != nil {
 		return err
 	}
-	wsURL := firstNonEmpty(envValue("WS_URL"), config.WSURL, defaultWSURL)
-	if err := validateWebSocketURL(wsURL); err != nil {
-		return err
+	apiURL := ""
+	if explicit := firstNonEmpty(envValue("API_URL"), config.APIURL); explicit != "" {
+		if apiURL, err = validateAPIURL(explicit); err != nil {
+			return err
+		}
 	}
-	project := firstNonEmpty(envValue("PROJECT"), config.Project, defaultProject)
 	state, err := secureRandomID()
 	if err != nil {
 		return fmt.Errorf("generate authorization state: %w", err)
@@ -811,7 +797,7 @@ func browserLogin(appURL string) error {
 <div style="text-align:center"><h1 style="margin:0 0 8px">whagons-dev is authorized</h1>
 <p style="color:#9db3aa;margin:0">You can close this tab and return to your terminal.</p></div></body>`)
 		select {
-		case resultCh <- configWithAuthorization(config, payload.APIKey, trustedAppURL, wsURL, project):
+		case resultCh <- configWithAuthorization(config, payload.APIKey, trustedAppURL, apiURL):
 		default:
 		}
 	})
@@ -836,7 +822,7 @@ func browserLogin(appURL string) error {
 	select {
 	case result := <-resultCh:
 		shutdownHTTPServer(server)
-		client, err := NewClient(wsURLWithProject(result.WSURL, result.Project), result.Project)
+		client, err := clientForConfig(result)
 		if err != nil {
 			return fmt.Errorf("verify authorized key: %w", err)
 		}
@@ -872,26 +858,10 @@ func readConfig() (Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return Config{}, err
 	}
-	if migrateLegacyRuntime(&config) {
-		if err := writeConfig(config); err != nil {
-			return Config{}, fmt.Errorf("migrate CLI runtime configuration: %w", err)
-		}
-	}
+	// Configs written for the Gonvex backend carry wsURL/project; they are
+	// ignored (the vault API lives at the app origin) and dropped on the next
+	// write.
 	return config, nil
-}
-
-// migrateLegacyRuntime moves only the exact former Skills Vault defaults. A
-// custom runtime or project remains user-owned and is never rewritten.
-func migrateLegacyRuntime(config *Config) bool {
-	if config == nil || strings.TrimSuffix(config.WSURL, "/") != legacyDefaultWSURL {
-		return false
-	}
-	if project := strings.TrimSpace(config.Project); project != "" && project != legacyDefaultProject {
-		return false
-	}
-	config.WSURL = defaultWSURL
-	config.Project = defaultProject
-	return true
 }
 
 func writeConfig(config Config) error {
@@ -987,17 +957,6 @@ func legacyConfigPath() string {
 	return filepath.Join(home, ".whagons-skills", "config.json")
 }
 
-func wsURLWithProject(rawURL, project string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("project", project)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 func validateAppURL(rawURL string) (string, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" || u.User != nil {
@@ -1010,15 +969,17 @@ func validateAppURL(rawURL string) (string, string, error) {
 	return u.String(), u.Scheme + "://" + u.Host, nil
 }
 
-func validateWebSocketURL(rawURL string) error {
-	u, err := url.Parse(rawURL)
+// validateAPIURL returns the endpoint without a trailing slash, query or
+// fragment. HTTPS is required except for loopback development.
+func validateAPIURL(rawURL string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Host == "" || u.User != nil {
-		return errors.New("vault WebSocket URL must be an absolute URL without user information")
+		return "", errors.New("vault API URL must be an absolute URL without user information")
 	}
-	if u.Scheme != "wss" && !(u.Scheme == "ws" && isLoopbackHost(u.Hostname())) {
-		return errors.New("vault WebSocket URL must use WSS (WS is allowed only for loopback development)")
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return "", errors.New("vault API URL must use HTTPS (HTTP is allowed only for loopback development)")
 	}
-	return nil
+	return u.Scheme + "://" + u.Host + strings.TrimSuffix(u.Path, "/"), nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -1463,12 +1424,6 @@ func openBrowser(rawURL string) error {
 	default:
 		return exec.Command("xdg-open", rawURL).Start()
 	}
-}
-
-func devJWT() string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"whagons-skills-cli","email":"cli@whagons.local"}`))
-	return header + "." + payload + ".cli"
 }
 
 func randomID() string {

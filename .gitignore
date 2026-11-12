@@ -8,3 +8,9 @@ cli/whagons-skills
 cli/whagons-dev
 *.log
 cli/cmd/whagons-dev/whagons-dev
+worker/node_modules
+worker/dist-assets
+worker/.wrangler
+worker/.dev.vars
+worker/worker-configuration.d.ts
+worker/dist-worker

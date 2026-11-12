@@ -1,0 +1,24 @@
+export const BUNDLE_FORMAT: string;
+export const GONVEX_EXPORT_FORMAT: string;
+export type ColumnKind = "text" | "time" | "timeNull" | "bool";
+export const TABLES: Record<string, { key: string; columns: Record<string, ColumnKind> }>;
+export const TABLE_NAMES: string[];
+export type Bundle = { format: string; exported_at: string; source: string; tables: Record<string, Array<Record<string, unknown>>> };
+export type Report = {
+  counts: Record<string, number>;
+  droppedExpiredSessions: number;
+  credentialFormats: Record<string, number>;
+  problems: string[];
+  warnings: string[];
+};
+export type TableStats = Record<string, { count: number; digest: string }>;
+export function normalizeTime(value: unknown): string | null;
+export function canonicalRow(table: string, row: Record<string, unknown>): Record<string, unknown>;
+export function canonicalTable(table: string, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>>;
+export function sha256Hex(text: string): Promise<string>;
+export function bundleStats(tables: Record<string, Array<Record<string, unknown>>>): Promise<TableStats>;
+export function credentialFormat(stored: unknown): string;
+export function transformExport(input: unknown, options?: { now?: string; allowPlaintext?: boolean; source?: string }): { bundle: Bundle; report: Report };
+export function gonvexExportSQL(): string;
+export function toPostgresSQL(bundle: { tables?: Record<string, Array<Record<string, unknown>>> }): string;
+export function parseExportText(text: string): unknown;
