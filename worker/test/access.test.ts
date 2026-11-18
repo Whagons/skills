@@ -122,7 +122,8 @@ describe("roles and per-item grants", () => {
     await fails("access.saveRole", { sessionToken: f.owner, role: { name: "" } }, "enter a role name of up to 80 characters");
     await fails("access.saveRole", { sessionToken: f.owner, role: { name: "x", scopes: ["skills:write"] } }, "editing requires read access");
     await fails("access.saveRole", { sessionToken: f.owner, role: { name: "x", scopes: ["root"] } }, 'unsupported api key scope "root"');
-    await fails("access.saveRole", { sessionToken: f.owner, role: { name: "x", scopes: ["skills:read"], skill_ids: ["nope"] } }, "a selected item no longer exists in this workspace");
+    const pruned = await ok("access.saveRole", { sessionToken: f.owner, role: { name: "x", scopes: ["skills:read"], skill_ids: ["nope", f.allowed.id] } });
+    expect(pruned.skill_ids).toEqual([f.allowed.id]);
   });
 
   it("enforces key scopes independently of the role", async () => {
