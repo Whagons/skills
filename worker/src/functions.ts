@@ -830,13 +830,13 @@ export const FUNCTIONS: Record<string, FunctionDef> = {
     if (role.skill_ids.length > LIMITS.maxWorkspaceSkills || role.credential_ids.length > LIMITS.maxWorkspaceCredentials) {
       throw new VaultError("too many selected resources");
     }
-    for (const [table, ids] of [["skills", role.skill_ids], ["skill_credentials", role.credential_ids]] as const) {
-      for (const id of ids) {
-        if (!c.one(`select 1 as ok from ${table} where owner_id = ? and id = ?`, identity.workspaceID, id)) {
-          throw new VaultError("a selected item no longer exists in this workspace");
-        }
-      }
-    }
+    // Drop selections that no longer exist (deleted since the role was saved,
+    // or carried over by the migration). They grant nothing, and rejecting
+    // them would make the role impossible to edit from the UI.
+    const existing = (table: string, ids: string[]) => [...new Set(ids)].filter((id) =>
+      c.one(`select 1 as ok from ${table} where owner_id = ? and id = ?`, identity.workspaceID, id));
+    role.skill_ids = existing("skills", role.skill_ids);
+    role.credential_ids = existing("skill_credentials", role.credential_ids);
     if (!role.id) {
       role.id = randomID();
       const count = Number(c.one<{ n: number }>("select count(*) as n from skill_access_roles where workspace_owner_id = ?", identity.workspaceID)?.n ?? 0);
